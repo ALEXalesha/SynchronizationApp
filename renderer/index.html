@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'"
+    />
+    <title>SyncGlass</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <!-- Живой фон с плавающими пятнами света под стеклом -->
+    <div class="backdrop">
+      <span class="blob blob-a"></span>
+      <span class="blob blob-b"></span>
+      <span class="blob blob-c"></span>
+    </div>
+
+    <main class="app">
+      <!-- Верхняя панель -->
+      <header class="glass topbar">
+        <div class="brand">
+          <span class="logo"></span>
+          <h1>SyncGlass</h1>
+        </div>
+
+        <div class="direction" id="direction" role="group" aria-label="Направление синхронизации">
+          <button class="dir-btn active" data-dir="toNetwork">
+            Локально <span class="arrow">→</span> Сеть
+          </button>
+          <button class="dir-btn" data-dir="toLocal">
+            Сеть <span class="arrow">→</span> Локально
+          </button>
+        </div>
+
+        <div class="topbar-right">
+          <span class="scan-status" id="scanStatus" hidden>
+            <span class="spinner"></span>
+            <span id="scanStatusText">Сканирую…</span>
+          </span>
+          <button class="glass-btn ghost" id="refreshBtn" title="Пересканировать папки">
+            ⟳ Обновить
+          </button>
+        </div>
+      </header>
+
+      <!-- Две панели со списком папок -->
+      <section class="panels">
+        <div class="glass panel">
+          <div class="panel-head">
+            <h2>Локально</h2>
+            <span class="panel-path" id="localPathLabel">путь не выбран</span>
+          </div>
+          <div class="list-head">
+            <label class="check-all">
+              <input type="checkbox" id="selectAll" />
+              <span>Выбрать все</span>
+            </label>
+            <span class="selected-count" id="selectedCount">выбрано: 0</span>
+          </div>
+          <ul class="folder-list" id="localList"></ul>
+        </div>
+
+        <div class="glass panel">
+          <div class="panel-head">
+            <h2>Сеть</h2>
+            <span class="panel-path" id="networkPathLabel">путь не выбран</span>
+          </div>
+          <div class="list-head muted-head">
+            <span class="hint">Синхронизируются папки, отмеченные слева</span>
+          </div>
+          <ul class="folder-list" id="networkList"></ul>
+        </div>
+      </section>
+
+      <!-- Нижняя панель: пути и синхронизация -->
+      <footer class="glass bottombar">
+        <div class="path-field">
+          <label>Локальная папка</label>
+          <div class="path-row">
+            <input type="text" id="localPath" placeholder="C:\Users\...\Documents" readonly />
+            <button class="glass-btn" data-pick="local">Обзор…</button>
+          </div>
+        </div>
+        <div class="path-field">
+          <label>Сетевая папка</label>
+          <div class="path-row">
+            <input type="text" id="networkPath" placeholder="\\Комп\Общая  или  Z:\" readonly />
+            <button class="glass-btn" data-pick="network">Обзор…</button>
+          </div>
+        </div>
+        <button class="glass-btn primary sync-btn" id="syncBtn" disabled>
+          Синхронизировать
+        </button>
+      </footer>
+    </main>
+
+    <!-- Модальное окно предпросмотра -->
+    <div class="modal-overlay" id="modal" hidden>
+      <div class="glass modal">
+        <h2 id="modalTitle">Предпросмотр синхронизации</h2>
+        <div class="preview-summary" id="previewSummary"></div>
+        <ul class="preview-list" id="previewList"></ul>
+        <div class="progress-wrap" id="progressWrap" hidden>
+          <div class="progress-bar"><span id="progressFill"></span></div>
+          <span class="progress-text" id="progressText"></span>
+        </div>
+        <div class="modal-actions">
+          <button class="glass-btn ghost" id="cancelBtn">Отмена</button>
+          <button class="glass-btn primary" id="confirmBtn">Выполнить</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="renderer.js"></script>
+  </body>
+</html>
