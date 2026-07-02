@@ -12,6 +12,7 @@ const state = {
   scanGen: 0,
   localOk: null, // доступность папок (постоянная проверка)
   networkOk: null,
+  sort: 'name', // 'name' | 'date'
 };
 
 // Узел: { name, relPath, isDir, hasLocal, hasNetwork, loaded, loading, children }
@@ -22,6 +23,7 @@ function makeNode(dto) {
     isDir: dto.isDir,
     hasLocal: dto.hasLocal,
     hasNetwork: dto.hasNetwork,
+    mtimeMs: dto.mtimeMs || 0,
     loaded: false,
     loading: false,
     children: [],
@@ -43,6 +45,8 @@ const el = {
   selectAlls: Array.from(document.querySelectorAll('.select-all')),
   localConn: document.getElementById('localConn'),
   netConn: document.getElementById('netConn'),
+  sortMode: document.getElementById('sortMode'),
+  progressBar: document.querySelector('.progress-bar'),
   sbDot: document.getElementById('sbDot'),
   sbText: document.getElementById('sbText'),
   sbSummary: document.getElementById('sbSummary'),
@@ -119,8 +123,26 @@ function persist() {
     localPath: state.localPath,
     networkPath: state.networkPath,
     direction: state.direction,
+    sort: state.sort,
   });
 }
+
+// Сортировка узлов: папки всегда сверху, внутри — по имени или по дате (новые сверху).
+function sortNodes(nodes) {
+  const arr = [...nodes];
+  arr.sort((a, b) => {
+    if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+    if (state.sort === 'date') return (b.mtimeMs || 0) - (a.mtimeMs || 0);
+    return a.name.localeCompare(b.name);
+  });
+  return arr;
+}
+
+el.sortMode.addEventListener('change', () => {
+  state.sort = el.sortMode.value;
+  persist();
+  renderTree();
+});
 
 // ---- Выбор путей ----
 async function pickFolder(side) {
@@ -274,7 +296,7 @@ function renderTree() {
 const CHILD_LIMIT = 500;
 
 function walk(nodes, depth) {
-  for (const node of nodes) {
+  for (const node of sortNodes(nodes)) {
     el.localList.appendChild(buildRow(node, depth, 'local'));
     el.networkList.appendChild(buildRow(node, depth, 'network'));
 
@@ -471,6 +493,12 @@ async function openPreview() {
   confirmMode = 'run';
   el.modal.hidden = false;
 
+  // Общее число файлов при сканировании заранее неизвестно, поэтому показываем
+  // «бегущую» полоску активности (индикатор, что процесс идёт).
+  el.progressWrap.hidden = false;
+  el.progressBar.classList.add('indeterminate');
+  el.progressFill.style.width = '';
+
   // Живой счётчик просканированных файлов.
   const unsub = window.api.onPreviewProgress(({ scanned }) => {
     el.previewSummary.innerHTML = `<div class="empty">Сканирую выбранное… ${scanned.toLocaleString('ru-RU')} файлов</div>`;
@@ -489,6 +517,9 @@ async function openPreview() {
     result = { error: err.message };
   } finally {
     unsub();
+    el.progressBar.classList.remove('indeterminate');
+    el.progressWrap.hidden = true;
+    el.progressFill.style.width = '0%';
   }
 
   if (result.aborted) return; // окно уже закрыто отменой
@@ -555,6 +586,7 @@ async function runSync() {
   el.confirmBtn.disabled = true;
   el.cancelBtn.disabled = true;
   el.progressWrap.hidden = false;
+  el.progressBar.classList.remove('indeterminate');
   el.progressFill.style.width = '0%';
   el.progressText.textContent = 'Начинаю…';
 
@@ -678,6 +710,10 @@ async function probeTick() {
 (async function init() {
   updateHeads();
   const s = (await window.api.getSettings()) || {};
+  if (s.sort === 'name' || s.sort === 'date') {
+    state.sort = s.sort;
+    el.sortMode.value = s.sort;
+  }
   if (s.direction) setDirection(s.direction);
   if (s.localPath) setPath('local', s.localPath);
   if (s.networkPath) setPath('network', s.networkPath);

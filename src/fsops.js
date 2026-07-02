@@ -102,8 +102,9 @@ async function listTopFolderNames(dir) {
     .sort((a, b) => a.localeCompare(b));
 }
 
-// Прямые дети папки: и подпапки, и файлы (без рекурсии). Быстро — один readdir.
-// Возвращает [{ name, isDir }].
+// Прямые дети папки: и подпапки, и файлы (без рекурсии).
+// Возвращает [{ name, isDir, mtimeMs }] — дата нужна для сортировки.
+// stat по каждому ребёнку идёт параллельно (быстро даже по сети).
 async function listChildren(dir) {
   let dirents;
   try {
@@ -112,12 +113,21 @@ async function listChildren(dir) {
     if (err.code === 'ENOENT') return [];
     throw err;
   }
+  const limit = createLimiter(SCAN_CONCURRENCY);
   const out = [];
+  const tasks = [];
   for (const d of dirents) {
     if (d.isSymbolicLink()) continue;
-    if (d.isDirectory()) out.push({ name: d.name, isDir: true });
-    else if (d.isFile()) out.push({ name: d.name, isDir: false });
+    if (!d.isDirectory() && !d.isFile()) continue;
+    const isDir = d.isDirectory();
+    tasks.push(
+      limit(() => fsp.stat(path.join(dir, d.name))).then(
+        (st) => out.push({ name: d.name, isDir, mtimeMs: st.mtimeMs }),
+        () => out.push({ name: d.name, isDir, mtimeMs: 0 }) // stat не удался — всё равно показываем
+      )
+    );
   }
+  await Promise.all(tasks);
   return out;
 }
 
