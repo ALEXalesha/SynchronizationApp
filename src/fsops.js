@@ -103,9 +103,11 @@ async function listTopFolderNames(dir) {
 }
 
 // Прямые дети папки: и подпапки, и файлы (без рекурсии).
-// Возвращает [{ name, isDir, mtimeMs }] — дата нужна для сортировки.
-// stat по каждому ребёнку идёт параллельно (быстро даже по сети).
-async function listChildren(dir) {
+// Возвращает [{ name, isDir, mtimeMs }].
+// withMtime=false — только readdir (быстро, без stat по каждому; дата = 0).
+// withMtime=true — дополнительно stat по каждому ребёнку (для сортировки по дате),
+// параллельно. Нужно только когда выбрана сортировка по дате.
+async function listChildren(dir, withMtime = false) {
   let dirents;
   try {
     dirents = await fsp.readdir(dir, { withFileTypes: true });
@@ -113,20 +115,23 @@ async function listChildren(dir) {
     if (err.code === 'ENOENT') return [];
     throw err;
   }
+
+  const kids = dirents.filter((d) => !d.isSymbolicLink() && (d.isDirectory() || d.isFile()));
+
+  if (!withMtime) {
+    // Быстрый путь: одна readdir, без обращений к каждому файлу.
+    return kids.map((d) => ({ name: d.name, isDir: d.isDirectory(), mtimeMs: 0 }));
+  }
+
   const limit = createLimiter(SCAN_CONCURRENCY);
   const out = [];
-  const tasks = [];
-  for (const d of dirents) {
-    if (d.isSymbolicLink()) continue;
-    if (!d.isDirectory() && !d.isFile()) continue;
+  const tasks = kids.map((d) => {
     const isDir = d.isDirectory();
-    tasks.push(
-      limit(() => fsp.stat(path.join(dir, d.name))).then(
-        (st) => out.push({ name: d.name, isDir, mtimeMs: st.mtimeMs }),
-        () => out.push({ name: d.name, isDir, mtimeMs: 0 }) // stat не удался — всё равно показываем
-      )
+    return limit(() => fsp.stat(path.join(dir, d.name))).then(
+      (st) => out.push({ name: d.name, isDir, mtimeMs: st.mtimeMs }),
+      () => out.push({ name: d.name, isDir, mtimeMs: 0 }) // stat не удался — всё равно показываем
     );
-  }
+  });
   await Promise.all(tasks);
   return out;
 }

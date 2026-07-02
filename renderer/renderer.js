@@ -146,9 +146,12 @@ function sortNodes(nodes) {
 }
 
 el.sortMode.addEventListener('change', () => {
+  const prev = state.sort;
   state.sort = el.sortMode.value;
   persist();
-  renderTree();
+  // Для сортировки по дате нужно подтянуть даты (по имени они не грузятся).
+  if (state.sort === 'date' && prev !== 'date') refresh({ force: false });
+  else renderTree();
 });
 
 // ---- Выбор путей ----
@@ -216,6 +219,7 @@ async function refresh({ force = false } = {}) {
     networkPath: state.networkPath,
     relPath: '',
     force,
+    needMtime: state.sort === 'date',
   });
   if (gen !== state.scanGen) return;
 
@@ -243,6 +247,7 @@ async function loadChildren(node) {
       localPath: state.localPath,
       networkPath: state.networkPath,
       relPath: node.relPath,
+      needMtime: state.sort === 'date',
     });
     node.children = items.map(makeNode);
     node.loaded = true;
@@ -747,6 +752,7 @@ async function lightRelistTop() {
     localPath: state.localPath,
     networkPath: state.networkPath,
     relPath: '',
+    needMtime: state.sort === 'date',
   });
   const sig = (arr) =>
     arr.map((n) => `${n.relPath}:${n.hasLocal ? 1 : 0}${n.hasNetwork ? 1 : 0}`).join('|');
