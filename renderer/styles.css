@@ -557,6 +557,16 @@ input[type="checkbox"]:indeterminate::after {
   color: var(--danger);
 }
 
+.preview-warn {
+  flex-basis: 100%;
+  font-size: 12px;
+  color: var(--amber);
+  background: rgba(179, 154, 99, 0.12);
+  border: 1px solid rgba(179, 154, 99, 0.3);
+  border-radius: var(--radius-sm);
+  padding: 8px 11px;
+}
+
 .preview-list {
   list-style: none;
   overflow-y: auto;

@@ -501,12 +501,18 @@ async function openPreview() {
     result.totals.copy + result.totals.overwrite + result.totals.trash === 0;
 }
 
-function renderPreview({ perFolder, totals }) {
+function renderPreview({ perFolder, totals, destTrashable }) {
   const dirLabel = state.direction === 'toNetwork' ? 'Локально → Сеть' : 'Сеть → Локально';
+  const delLabel = destTrashable ? 'в Корзину' : 'удалить';
+  const warn =
+    !destTrashable && totals.trash > 0
+      ? '<div class="preview-warn">⚠ На сетевой папке нет Корзины — лишние файлы будут удалены безвозвратно.</div>'
+      : '';
   el.previewSummary.innerHTML = `
     <div class="stat copy"><span class="num">${totals.copy}</span><span class="lbl">скопировать</span></div>
     <div class="stat overwrite"><span class="num">${totals.overwrite}</span><span class="lbl">перезаписать</span></div>
-    <div class="stat trash"><span class="num">${totals.trash}</span><span class="lbl">в Корзину</span></div>`;
+    <div class="stat trash"><span class="num">${totals.trash}</span><span class="lbl">${delLabel}</span></div>
+    ${warn}`;
 
   el.previewList.innerHTML =
     `<li class="pv-head" style="color:var(--text-dim);font-size:12px">${dirLabel}</li>` +
@@ -556,14 +562,15 @@ async function runSync() {
 
   try {
     const { folders, excludes } = collectSelection();
-    await window.api.sync({
+    const res = await window.api.sync({
       localPath: state.localPath,
       networkPath: state.networkPath,
       folders,
       excludes,
       direction: state.direction,
     });
-    el.progressText.textContent = 'Готово ✓';
+    const perm = res && res.permanentDeletes ? ` · удалено безвозвратно: ${res.permanentDeletes}` : '';
+    el.progressText.textContent = `Готово ✓${perm}`;
     el.confirmBtn.textContent = 'Закрыть';
     el.confirmBtn.disabled = false;
     confirmMode = 'close';
