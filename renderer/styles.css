@@ -144,6 +144,14 @@ body {
   align-items: center;
   gap: 10px;
 }
+.size-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
 .sort-field {
   display: flex;
   align-items: center;

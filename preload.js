@@ -25,6 +25,7 @@ contextBridge.exposeInMainWorld('api', {
     return () => ipcRenderer.removeListener('sync-progress', listener);
   },
   startCrawl: (args) => ipcRenderer.invoke('start-crawl', args),
+  stopCrawl: () => ipcRenderer.invoke('stop-crawl'),
   onCrawl: (callbacks) => {
     const cached = (_e, d) => callbacks.onCached && callbacks.onCached(d);
     const progress = (_e, d) => callbacks.onProgress && callbacks.onProgress(d);

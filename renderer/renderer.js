@@ -13,6 +13,7 @@ const state = {
   localOk: null, // доступность папок (постоянная проверка)
   networkOk: null,
   sort: 'name', // 'name' | 'date'
+  showSizes: true, // считать ли размеры в фоне (для 500k+ можно выключить)
 };
 
 // Узел: { name, relPath, isDir, hasLocal, hasNetwork, loaded, loading, children }
@@ -46,6 +47,7 @@ const el = {
   localConn: document.getElementById('localConn'),
   netConn: document.getElementById('netConn'),
   sortMode: document.getElementById('sortMode'),
+  sizeToggle: document.getElementById('sizeToggle'),
   progressBar: document.querySelector('.progress-bar'),
   sbDot: document.getElementById('sbDot'),
   sbText: document.getElementById('sbText'),
@@ -131,6 +133,7 @@ function persist() {
     networkPath: state.networkPath,
     direction: state.direction,
     sort: state.sort,
+    showSizes: state.showSizes,
   });
 }
 
@@ -143,6 +146,28 @@ function sortNodes(nodes) {
     return a.name.localeCompare(b.name);
   });
   return arr;
+}
+
+// Отсортированные дети узла с кешем — чтобы не пересортировывать большие папки
+// на каждом рендере. Кеш сбрасывается при смене сортировки или перезагрузке детей.
+function sortedChildren(node) {
+  if (node._sortKey !== state.sort || !node._sorted) {
+    node._sorted = sortNodes(node.children);
+    node._sortKey = state.sort;
+  }
+  return node._sorted;
+}
+let sortedRootsCache = null;
+let sortedRootsKey = null;
+function sortedRoots() {
+  if (sortedRootsKey !== state.sort || !sortedRootsCache) {
+    sortedRootsCache = sortNodes(state.roots);
+    sortedRootsKey = state.sort;
+  }
+  return sortedRootsCache;
+}
+function invalidateRootSort() {
+  sortedRootsCache = null;
 }
 
 el.sortMode.addEventListener('change', () => {
@@ -230,6 +255,7 @@ async function refresh({ force = false } = {}) {
   if (gen !== state.scanGen) return;
 
   state.roots = items.map(makeNode);
+  invalidateRootSort();
 
   const rootNames = new Set(state.roots.map((n) => n.relPath));
   for (const key of [...state.marks.keys()]) {
@@ -240,9 +266,27 @@ async function refresh({ force = false } = {}) {
   renderTree();
 
   // Фоновая загрузка размеров и файлов (не блокирует интерфейс).
-  setStatus('busy', 'Загрузка размеров и файлов…', '');
-  window.api.startCrawl({ localPath: state.localPath, networkPath: state.networkPath });
+  if (state.showSizes) {
+    setStatus('busy', 'Загрузка размеров и файлов…', '');
+    window.api.startCrawl({ localPath: state.localPath, networkPath: state.networkPath });
+  } else {
+    setStatus('idle', 'Готово (размеры отключены)');
+  }
 }
+
+el.sizeToggle.addEventListener('change', () => {
+  state.showSizes = el.sizeToggle.checked;
+  persist();
+  if (state.showSizes) {
+    setStatus('busy', 'Загрузка размеров и файлов…', '');
+    window.api.startCrawl({ localPath: state.localPath, networkPath: state.networkPath });
+  } else {
+    window.api.stopCrawl();
+    state.sizeMap.clear();
+    setStatus('idle', 'Размеры отключены');
+    renderTree();
+  }
+});
 
 async function loadChildren(node) {
   if (node.loaded || node.loading) return;
@@ -256,6 +300,7 @@ async function loadChildren(node) {
       needMtime: state.sort === 'date',
     });
     node.children = items.map(makeNode);
+    node._sorted = null; // дети изменились — пересортировать
     node.loaded = true;
   } finally {
     node.loading = false;
@@ -305,7 +350,7 @@ function renderTree() {
     return;
   }
 
-  walk(state.roots, 0);
+  walk(sortedRoots(), 0);
   el.localList.scrollTop = lScroll;
   el.networkList.scrollTop = rScroll;
   updateControls();
@@ -313,8 +358,9 @@ function renderTree() {
 
 const CHILD_LIMIT = 500;
 
-function walk(nodes, depth) {
-  for (const node of sortNodes(nodes)) {
+// Принимает уже отсортированный массив узлов (кеш сортировки — в sortedRoots/sortedChildren).
+function walk(sorted, depth) {
+  for (const node of sorted) {
     el.localList.appendChild(buildRow(node, depth, 'local'));
     el.networkList.appendChild(buildRow(node, depth, 'network'));
 
@@ -322,10 +368,10 @@ function walk(nodes, depth) {
       if (node.children.length === 0) {
         appendPlaceholder('(пусто)', depth + 1);
       } else {
-        // Сортируем до обрезки, иначе «…ещё N» прячет не те элементы.
-        const shown = sortNodes(node.children).slice(0, CHILD_LIMIT);
+        const kids = sortedChildren(node); // отсортировано и закешировано
+        const shown = kids.slice(0, CHILD_LIMIT);
         walk(shown, depth + 1);
-        const hidden = node.children.length - shown.length;
+        const hidden = kids.length - shown.length;
         if (hidden > 0) appendPlaceholder(`…ещё ${hidden}`, depth + 1);
       }
     }
@@ -486,8 +532,10 @@ window.api.onCrawl({
     mergeSizes(entries);
     setStatus('busy', 'Загрузка размеров и файлов…', `${fmtNum(scanned)} объектов`);
   },
-  onDone: ({ scanned, ok }) => {
+  onDone: ({ scanned, ok, toobig }) => {
     if (ok) setStatus('done', 'Готово', `${fmtNum(scanned)} объектов`);
+    else if (toobig)
+      setStatus('error', 'Слишком много файлов — подсчёт размеров остановлен', `${fmtNum(scanned)}+`);
     else setStatus('error', 'Не удалось загрузить размеры');
     renderTree();
   },
@@ -775,6 +823,7 @@ async function lightRelistTop() {
     }
     return makeNode(it);
   });
+  invalidateRootSort();
 
   // Убираем отметки папок, которых больше нет на верхнем уровне.
   const rootNames = new Set(state.roots.map((n) => n.relPath));
@@ -825,6 +874,10 @@ async function probeTick() {
   if (s.sort === 'name' || s.sort === 'date') {
     state.sort = s.sort;
     el.sortMode.value = s.sort;
+  }
+  if (s.showSizes === false) {
+    state.showSizes = false;
+    el.sizeToggle.checked = false;
   }
   if (s.direction) setDirection(s.direction);
   if (s.localPath) setPath('local', s.localPath);
