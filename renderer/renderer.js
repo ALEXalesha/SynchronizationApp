@@ -50,6 +50,7 @@ const el = {
   sbDot: document.getElementById('sbDot'),
   sbText: document.getElementById('sbText'),
   sbSummary: document.getElementById('sbSummary'),
+  sbBar: document.getElementById('sbBar'),
   modal: document.getElementById('modal'),
   modalTitle: document.getElementById('modalTitle'),
   previewSummary: document.getElementById('previewSummary'),
@@ -89,6 +90,7 @@ function setStatus(kind, text, summary = '') {
   el.sbDot.className = 'sb-dot ' + kind; // busy | done | idle | error
   el.sbText.textContent = text;
   el.sbSummary.textContent = summary;
+  el.sbBar.hidden = kind !== 'busy'; // бегущая полоска только во время загрузки
 }
 
 // ---- Модель выбора (трёхпозиционная) ----

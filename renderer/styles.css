@@ -198,6 +198,27 @@ body {
   gap: 9px;
   padding: 7px 14px;
   font-size: 12.5px;
+  position: relative;
+  overflow: hidden;
+}
+/* Тонкая бегущая полоска активности внизу статус-бара (во время загрузки) */
+.sb-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background: rgba(255, 255, 255, 0.06);
+}
+.sb-bar[hidden] {
+  display: none;
+}
+.sb-bar span {
+  display: block;
+  height: 100%;
+  width: 35%;
+  background: var(--accent);
+  animation: indeterminate 1.1s ease-in-out infinite;
 }
 .sb-dot {
   width: 8px;
