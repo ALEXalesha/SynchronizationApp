@@ -714,6 +714,7 @@ input[type="checkbox"]:indeterminate::after {
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: var(--radius-sm);
   overflow: hidden;
+  flex-shrink: 0; /* в flex-column со скроллом иначе схлопывается в 0 высоты */
 }
 .hist-head {
   display: flex;
@@ -785,6 +786,7 @@ input[type="checkbox"]:indeterminate::after {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex-shrink: 0; /* не сжиматься в flex-column со скроллом */
 }
 .hist-file.trash {
   color: var(--danger);
