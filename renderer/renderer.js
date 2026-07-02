@@ -10,6 +10,8 @@ const state = {
   expanded: new Set(), // relPath развёрнутых узлов
   sizeMap: new Map(), // relPath -> { sizeLocal, cntLocal, sizeNetwork, cntNetwork }
   scanGen: 0,
+  localOk: null, // доступность папок (постоянная проверка)
+  networkOk: null,
 };
 
 // Узел: { name, relPath, isDir, hasLocal, hasNetwork, loaded, loading, children }
@@ -39,6 +41,8 @@ const el = {
   direction: document.getElementById('direction'),
   heads: Array.from(document.querySelectorAll('.list-head[data-side]')),
   selectAlls: Array.from(document.querySelectorAll('.select-all')),
+  localConn: document.getElementById('localConn'),
+  netConn: document.getElementById('netConn'),
   sbDot: document.getElementById('sbDot'),
   sbText: document.getElementById('sbText'),
   sbSummary: document.getElementById('sbSummary'),
@@ -123,6 +127,8 @@ async function pickFolder(side) {
   const dir = await window.api.pickFolder();
   if (!dir) return;
   setPath(side, dir);
+  state.sizeMap.clear(); // путь сменился — старые размеры больше не годятся
+  state.marks.clear();
   persist();
   await refresh({ force: true });
 }
@@ -174,7 +180,6 @@ async function refresh({ force = false } = {}) {
   const gen = ++state.scanGen;
 
   state.expanded.clear();
-  state.sizeMap.clear();
   setStatus('busy', 'Читаю список папок…');
 
   const items = await window.api.listFolders({
@@ -549,6 +554,75 @@ async function runSync() {
   }
 }
 
+// ---- Постоянная проверка доступности папок ----
+function setConn(dot, ok, has) {
+  if (!has) {
+    dot.className = 'conn-dot';
+    dot.title = '';
+    return;
+  }
+  dot.className = 'conn-dot ' + (ok ? 'ok' : 'bad');
+  dot.title = ok ? 'доступно' : 'недоступно';
+}
+
+// Лёгкое обновление верхнего уровня без сброса дерева и размеров:
+// обновляет присутствие папок (чинит залипшее «нет в сети»), ловит новые/удалённые.
+async function lightRelistTop() {
+  if (!state.localPath && !state.networkPath) return;
+  const items = await window.api.listFolders({
+    localPath: state.localPath,
+    networkPath: state.networkPath,
+    relPath: '',
+  });
+  const sig = (arr) =>
+    arr.map((n) => `${n.relPath}:${n.hasLocal ? 1 : 0}${n.hasNetwork ? 1 : 0}`).join('|');
+  const oldSig = sig(state.roots);
+  const byRel = new Map(state.roots.map((n) => [n.relPath, n]));
+  state.roots = items.map((it) => {
+    const ex = byRel.get(it.relPath);
+    if (ex) {
+      ex.isDir = it.isDir;
+      ex.hasLocal = it.hasLocal;
+      ex.hasNetwork = it.hasNetwork;
+      return ex;
+    }
+    return makeNode(it);
+  });
+  if (oldSig !== sig(state.roots)) renderTree();
+}
+
+let probing = false;
+async function probeTick() {
+  if (probing || (!state.localPath && !state.networkPath)) return;
+  probing = true;
+  try {
+    const r = await window.api.probe({
+      localPath: state.localPath,
+      networkPath: state.networkPath,
+    });
+    setConn(el.localConn, r.localOk, !!state.localPath);
+    setConn(el.netConn, r.networkOk, !!state.networkPath);
+
+    const changed =
+      (state.networkOk !== null && r.networkOk !== state.networkOk) ||
+      (state.localOk !== null && r.localOk !== state.localOk);
+    state.networkOk = r.networkOk;
+    state.localOk = r.localOk;
+
+    if (changed) {
+      // Связь появилась/пропала — обновляем список и пересчитываем размеры.
+      await refresh({ force: false });
+    } else if (r.localOk || r.networkOk) {
+      // Стабильно — дёшево держим список верхнего уровня актуальным.
+      await lightRelistTop();
+    }
+  } catch {
+    // сбой запроса (сеть моргнула) — не критично, повторим на следующем тике
+  } finally {
+    probing = false;
+  }
+}
+
 // ---- Старт ----
 (async function init() {
   updateHeads();
@@ -557,4 +631,6 @@ async function runSync() {
   if (s.localPath) setPath('local', s.localPath);
   if (s.networkPath) setPath('network', s.networkPath);
   if (s.localPath || s.networkPath) await refresh({ force: true });
+  probeTick();
+  setInterval(probeTick, 6000);
 })();

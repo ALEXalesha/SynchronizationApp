@@ -234,6 +234,22 @@ body {
   font-weight: 600;
   letter-spacing: 0.2px;
 }
+.conn-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  margin-left: 4px;
+  vertical-align: middle;
+  background: transparent;
+}
+.conn-dot.ok {
+  background: var(--ok);
+}
+.conn-dot.bad {
+  background: var(--danger);
+  animation: pulse 1.1s ease-in-out infinite;
+}
 .panel-path {
   font-size: 11px;
   color: var(--text-dim);

@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('api', {
   getSettings: () => ipcRenderer.invoke('get-settings'),
   saveSettings: (settings) => ipcRenderer.invoke('save-settings', settings),
   pickFolder: () => ipcRenderer.invoke('pick-folder'),
+  probe: (args) => ipcRenderer.invoke('probe', args),
   listFolders: (args) => ipcRenderer.invoke('list-folders', args),
   preview: (args) => ipcRenderer.invoke('preview', args),
   sync: (args) => ipcRenderer.invoke('sync', args),
