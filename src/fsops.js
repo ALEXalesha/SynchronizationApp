@@ -111,9 +111,10 @@ async function listChildren(dir, withMtime = false) {
   let dirents;
   try {
     dirents = await fsp.readdir(dir, { withFileTypes: true });
-  } catch (err) {
-    if (err.code === 'ENOENT') return [];
-    throw err;
+  } catch {
+    // Папки нет или сторона недоступна (сеть отвалилась) — показываем пусто,
+    // а не рушим весь листинг. Доступность отражают индикаторы связи.
+    return [];
   }
 
   const kids = dirents.filter((d) => !d.isSymbolicLink() && (d.isDirectory() || d.isFile()));

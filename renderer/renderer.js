@@ -214,13 +214,19 @@ async function refresh({ force = false } = {}) {
   state.expanded.clear();
   setStatus('busy', 'Читаю список папок…');
 
-  const items = await window.api.listFolders({
-    localPath: state.localPath,
-    networkPath: state.networkPath,
-    relPath: '',
-    force,
-    needMtime: state.sort === 'date',
-  });
+  let items;
+  try {
+    items = await window.api.listFolders({
+      localPath: state.localPath,
+      networkPath: state.networkPath,
+      relPath: '',
+      force,
+      needMtime: state.sort === 'date',
+    });
+  } catch (err) {
+    setStatus('error', 'Не удалось прочитать папки', err.message || '');
+    return;
+  }
   if (gen !== state.scanGen) return;
 
   state.roots = items.map(makeNode);
