@@ -144,7 +144,7 @@ async function crawlTree(root, rel, onEntry, run = null) {
     if (d.isDirectory()) {
       tasks.push(
         crawlTree(root, childRel, onEntry, limit).then(async (sub) => {
-          await onEntry(childRel, true, sub.size, sub.count);
+          await onEntry(childRel, true, sub.size, sub.count, null);
           size += sub.size;
           count += sub.count;
         })
@@ -152,7 +152,7 @@ async function crawlTree(root, rel, onEntry, run = null) {
     } else if (d.isFile()) {
       tasks.push(
         limit(() => fsp.stat(path.join(root, childRel))).then(async (st) => {
-          await onEntry(childRel, false, st.size, 1);
+          await onEntry(childRel, false, st.size, 1, st.mtimeMs);
           size += st.size;
           count += 1;
         })
@@ -167,14 +167,21 @@ async function ensureDir(dir) {
   await fsp.mkdir(dir, { recursive: true });
 }
 
+// Возвращает true если скопировал, false если источник исчез (устаревшие данные).
 async function copyFile(srcRoot, dstRoot, relPath) {
   const src = path.join(srcRoot, relPath);
   const dst = path.join(dstRoot, relPath);
-  await ensureDir(path.dirname(dst));
-  await fsp.copyFile(src, dst);
-  // Переносим mtime, чтобы последующие сравнения считали файлы одинаковыми.
-  const stat = await fsp.stat(src);
-  await fsp.utimes(dst, stat.atime, stat.mtime);
+  try {
+    await ensureDir(path.dirname(dst));
+    await fsp.copyFile(src, dst);
+    // Переносим mtime, чтобы последующие сравнения считали файлы одинаковыми.
+    const stat = await fsp.stat(src);
+    await fsp.utimes(dst, stat.atime, stat.mtime);
+    return true;
+  } catch (err) {
+    if (err.code === 'ENOENT') return false; // файл удалён с момента сканирования
+    throw err;
+  }
 }
 
 // Выполняет план синхронизации из src.js.
@@ -193,8 +200,9 @@ async function applyPlan(srcRoot, dstRoot, plan, trashFn, onProgress = () => {})
     report('copy', entry.path);
   }
   for (const entry of plan.overwrite) {
-    await copyFile(srcRoot, dstRoot, entry.path);
-    report('overwrite', entry.path);
+    const copied = await copyFile(srcRoot, dstRoot, entry.path);
+    if (copied) report('overwrite', entry.path);
+    else report('copy', entry.path); // источник исчез — молча пропустили
   }
   for (const entry of plan.trash) {
     await trashFn(path.join(dstRoot, entry.path));
