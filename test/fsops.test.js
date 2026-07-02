@@ -171,6 +171,26 @@ test('исключённая подпапка не копируется и не 
   assert.strictEqual(fs.existsSync(path.join(dst, 'docs/extra.txt')), false);
 });
 
+test('applyPlan не падает на ошибке файла, копит failures и продолжает', async () => {
+  const src = await tmpDir();
+  const dst = await tmpDir();
+  await writeFile(src, 'a.txt', 'A');
+  await writeFile(src, 'b.txt', 'B');
+  await writeFile(dst, 'x.txt', 'X'); // лишний → в trash, но trashFn бросит EPERM
+
+  const plan = planSync(await scanFiles(src), await scanFiles(dst));
+  const res = await applyPlan(src, dst, plan, async () => {
+    throw Object.assign(new Error('operation not permitted'), { code: 'EPERM' });
+  });
+
+  // Копирование прошло несмотря на ошибку удаления.
+  assert.strictEqual(await fsp.readFile(path.join(dst, 'a.txt'), 'utf8'), 'A');
+  assert.strictEqual(await fsp.readFile(path.join(dst, 'b.txt'), 'utf8'), 'B');
+  assert.strictEqual(res.failures.length, 1);
+  assert.strictEqual(res.failures[0].action, 'trash');
+  assert.strictEqual(res.failures[0].code, 'EPERM');
+});
+
 test('applyPlan копирует, перезаписывает и удаляет (в мок-корзину)', async () => {
   const src = await tmpDir();
   const dst = await tmpDir();

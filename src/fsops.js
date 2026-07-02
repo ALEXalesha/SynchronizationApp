@@ -171,45 +171,69 @@ async function ensureDir(dir) {
 async function copyFile(srcRoot, dstRoot, relPath) {
   const src = path.join(srcRoot, relPath);
   const dst = path.join(dstRoot, relPath);
+
+  await ensureDir(path.dirname(dst));
   try {
-    await ensureDir(path.dirname(dst));
     await fsp.copyFile(src, dst);
-    // Переносим mtime, чтобы последующие сравнения считали файлы одинаковыми.
+  } catch (err) {
+    if (err.code === 'ENOENT') return false; // источник исчез с момента сканирования
+    if (err.code === 'EPERM' || err.code === 'EACCES') {
+      // приёмник, вероятно, read-only — снимаем атрибут и пробуем снова
+      await fsp.chmod(dst, 0o666).catch(() => {});
+      await fsp.copyFile(src, dst);
+    } else {
+      throw err;
+    }
+  }
+
+  // Перенос даты не критичен: сетевые шары часто запрещают utimes (EPERM).
+  // Если не вышло — просто пропускаем, файл всё равно скопирован.
+  try {
     const stat = await fsp.stat(src);
     await fsp.utimes(dst, stat.atime, stat.mtime);
-    return true;
-  } catch (err) {
-    if (err.code === 'ENOENT') return false; // файл удалён с момента сканирования
-    throw err;
+  } catch {
+    // дату перенести не удалось — не критично
   }
+  return true;
 }
 
 // Выполняет план синхронизации из src.js.
-// trashFn(absPath) — функция удаления в Корзину (в Electron это shell.trashItem).
+// trashFn(absPath) — функция удаления (в Электроне через Корзину/rm).
 // onProgress({ done, total, action, path }) — колбэк прогресса (необязателен).
+// Ошибка отдельного файла не обрывает синхронизацию: копится в failures.
 async function applyPlan(srcRoot, dstRoot, plan, trashFn, onProgress = () => {}) {
   const total = plan.copy.length + plan.overwrite.length + plan.trash.length;
   let done = 0;
+  const failures = [];
   const report = (action, relPath) => {
     done += 1;
     onProgress({ done, total, action, path: relPath });
   };
 
-  for (const entry of plan.copy) {
-    await copyFile(srcRoot, dstRoot, entry.path);
-    report('copy', entry.path);
-  }
-  for (const entry of plan.overwrite) {
-    const copied = await copyFile(srcRoot, dstRoot, entry.path);
-    if (copied) report('overwrite', entry.path);
-    else report('copy', entry.path); // источник исчез — молча пропустили
-  }
+  const copyBatch = async (entries, action) => {
+    for (const entry of entries) {
+      try {
+        await copyFile(srcRoot, dstRoot, entry.path);
+      } catch (err) {
+        failures.push({ action, path: entry.path, code: err.code || String(err.message) });
+      }
+      report(action, entry.path);
+    }
+  };
+
+  await copyBatch(plan.copy, 'copy');
+  await copyBatch(plan.overwrite, 'overwrite');
+
   for (const entry of plan.trash) {
-    await trashFn(path.join(dstRoot, entry.path));
+    try {
+      await trashFn(path.join(dstRoot, entry.path));
+    } catch (err) {
+      failures.push({ action: 'trash', path: entry.path, code: err.code || String(err.message) });
+    }
     report('trash', entry.path);
   }
 
-  return { done, total };
+  return { done, total, failures };
 }
 
 module.exports = {

@@ -570,7 +570,13 @@ async function runSync() {
       direction: state.direction,
     });
     const perm = res && res.permanentDeletes ? ` · удалено безвозвратно: ${res.permanentDeletes}` : '';
-    el.progressText.textContent = `Готово ✓${perm}`;
+    if (res && res.failures) {
+      el.progressText.textContent = `Готово с ошибками: ${res.failures} файлов не удалось${perm}`;
+      const sample = (res.failuresSample || []).map((s) => escapeHtml(s)).join('<br>');
+      el.previewSummary.innerHTML = `<div class="preview-warn">⚠ Не удалось обработать ${res.failures} файлов (нет прав или заняты):<br>${sample}${res.failures > 5 ? '<br>…' : ''}</div>`;
+    } else {
+      el.progressText.textContent = `Готово ✓${perm}`;
+    }
     el.confirmBtn.textContent = 'Закрыть';
     el.confirmBtn.disabled = false;
     confirmMode = 'close';
