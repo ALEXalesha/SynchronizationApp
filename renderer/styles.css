@@ -22,6 +22,11 @@
   padding: 0;
 }
 
+/* Атрибут hidden должен всегда скрывать, даже если у элемента задан display */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   height: 100%;
