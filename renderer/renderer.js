@@ -306,7 +306,8 @@ function walk(nodes, depth) {
       if (node.children.length === 0) {
         appendPlaceholder('(пусто)', depth + 1);
       } else {
-        const shown = node.children.slice(0, CHILD_LIMIT);
+        // Сортируем до обрезки, иначе «…ещё N» прячет не те элементы.
+        const shown = sortNodes(node.children).slice(0, CHILD_LIMIT);
         walk(shown, depth + 1);
         const hidden = node.children.length - shown.length;
         if (hidden > 0) appendPlaceholder(`…ещё ${hidden}`, depth + 1);
@@ -669,11 +670,20 @@ async function lightRelistTop() {
       ex.isDir = it.isDir;
       ex.hasLocal = it.hasLocal;
       ex.hasNetwork = it.hasNetwork;
+      ex.mtimeMs = it.mtimeMs || 0; // держим дату свежей для сортировки
       return ex;
     }
     return makeNode(it);
   });
+
+  // Убираем отметки папок, которых больше нет на верхнем уровне.
+  const rootNames = new Set(state.roots.map((n) => n.relPath));
+  for (const key of [...state.marks.keys()]) {
+    if (!rootNames.has(key.split('/')[0])) state.marks.delete(key);
+  }
+
   if (oldSig !== sig(state.roots)) renderTree();
+  else updateControls();
 }
 
 let probing = false;
