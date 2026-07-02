@@ -60,6 +60,11 @@ const el = {
   progressText: document.getElementById('progressText'),
   cancelBtn: document.getElementById('cancelBtn'),
   confirmBtn: document.getElementById('confirmBtn'),
+  historyBtn: document.getElementById('historyBtn'),
+  historyModal: document.getElementById('historyModal'),
+  historyList: document.getElementById('historyList'),
+  clearHistoryBtn: document.getElementById('clearHistoryBtn'),
+  historyCloseBtn: document.getElementById('historyCloseBtn'),
 };
 
 // ---- Утилиты ----
@@ -638,6 +643,89 @@ async function runSync() {
   } finally {
     unsubscribe();
   }
+}
+
+// ---- История синхронизаций ----
+el.historyBtn.addEventListener('click', openHistory);
+el.historyCloseBtn.addEventListener('click', () => {
+  el.historyModal.hidden = true;
+});
+el.clearHistoryBtn.addEventListener('click', async () => {
+  await window.api.clearHistory();
+  renderHistory([]);
+});
+
+async function openHistory() {
+  el.historyList.innerHTML = '<div class="empty">Загрузка…</div>';
+  el.historyModal.hidden = false;
+  const list = await window.api.getHistory();
+  renderHistory(list);
+}
+
+function fmtDateTime(iso) {
+  try {
+    return new Date(iso).toLocaleString('ru-RU');
+  } catch {
+    return iso;
+  }
+}
+
+function renderHistory(list) {
+  if (!list || list.length === 0) {
+    el.historyList.innerHTML =
+      '<div class="empty">Пока нет записей — история появится после синхронизации.</div>';
+    return;
+  }
+
+  el.historyList.innerHTML = list
+    .map((run) => {
+      const dir = run.direction === 'toNetwork' ? 'Локально → Сеть' : 'Сеть → Локально';
+      const t = run.totals || { copy: 0, overwrite: 0, trash: 0 };
+      const parts = [];
+      if (t.copy) parts.push(`<span class="hc-copy">+${t.copy}</span>`);
+      if (t.overwrite) parts.push(`<span class="hc-over">~${t.overwrite}</span>`);
+      if (t.trash) parts.push(`<span class="hc-trash">−${t.trash}</span>`);
+      const counts = parts.join(' ') || 'без изменений';
+
+      const badges = [];
+      if (run.permanentDeletes)
+        badges.push(`<span class="hist-badge danger">безвозвратно: ${run.permanentDeletes}</span>`);
+      if (run.failures)
+        badges.push(`<span class="hist-badge warn">ошибок: ${run.failures}</span>`);
+
+      const files = (run.files || [])
+        .map((f) => {
+          const sym = { trash: '−', overwrite: '~', copy: '+' }[f.action] || '';
+          return `<div class="hist-file ${f.action}">${sym} ${escapeHtml(f.path)}</div>`;
+        })
+        .join('');
+      const more = run.filesTruncated
+        ? `<div class="hist-file muted">…ещё ${run.filesTruncated} (не сохранены)</div>`
+        : '';
+
+      return `
+        <div class="hist-run">
+          <div class="hist-head">
+            <span class="hist-caret">▸</span>
+            <span class="hist-time">${escapeHtml(fmtDateTime(run.time))}</span>
+            <span class="hist-dir">${dir}</span>
+            <span class="hist-counts">${counts}</span>
+            ${badges.join(' ')}
+          </div>
+          <div class="hist-files" hidden>${files}${more}</div>
+        </div>`;
+    })
+    .join('');
+
+  el.historyList.querySelectorAll('.hist-head').forEach((head) => {
+    head.addEventListener('click', () => {
+      const files = head.nextElementSibling;
+      const caret = head.querySelector('.hist-caret');
+      const wasHidden = files.hidden;
+      files.hidden = !wasHidden;
+      caret.textContent = wasHidden ? '▾' : '▸';
+    });
+  });
 }
 
 // ---- Постоянная проверка доступности папок ----

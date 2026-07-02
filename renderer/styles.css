@@ -687,3 +687,110 @@ input[type="checkbox"]:indeterminate::after {
   text-align: center;
   padding: 24px 10px;
 }
+
+/* ---------- История ---------- */
+.history-modal {
+  width: min(640px, 94vw);
+}
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.history-list {
+  overflow-y: auto;
+  max-height: 62vh;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.hist-run {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.hist-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 11px;
+  cursor: pointer;
+  font-size: 12.5px;
+  background: rgba(255, 255, 255, 0.03);
+}
+.hist-head:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+.hist-caret {
+  width: 12px;
+  color: var(--text-dim);
+  font-size: 10px;
+  flex-shrink: 0;
+}
+.hist-time {
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  white-space: nowrap;
+}
+.hist-dir {
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.hist-counts {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.hc-copy {
+  color: var(--accent);
+}
+.hc-over {
+  color: var(--amber);
+}
+.hc-trash {
+  color: var(--danger);
+}
+.hist-badge {
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.hist-badge.danger {
+  color: var(--danger);
+  background: rgba(192, 122, 122, 0.15);
+}
+.hist-badge.warn {
+  color: var(--amber);
+  background: rgba(179, 154, 99, 0.15);
+}
+.hist-files {
+  padding: 6px 11px 9px 33px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 34vh;
+  overflow-y: auto;
+}
+.hist-file {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hist-file.trash {
+  color: var(--danger);
+}
+.hist-file.overwrite {
+  color: var(--amber);
+}
+.hist-file.copy {
+  color: var(--accent);
+}
+.hist-file.muted {
+  color: rgba(223, 227, 232, 0.32);
+  font-style: italic;
+}

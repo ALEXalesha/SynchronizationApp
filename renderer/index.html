@@ -43,6 +43,9 @@
               <option value="date">По дате</option>
             </select>
           </label>
+          <button class="glass-btn ghost" id="historyBtn" title="История синхронизаций">
+            🕘 История
+          </button>
           <button class="glass-btn ghost" id="refreshBtn" title="Пересканировать папки">
             ⟳ Обновить
           </button>
@@ -127,6 +130,20 @@
         <div class="modal-actions">
           <button class="glass-btn ghost" id="cancelBtn">Отмена</button>
           <button class="glass-btn primary" id="confirmBtn">Выполнить</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Окно истории синхронизаций -->
+    <div class="modal-overlay" id="historyModal" hidden>
+      <div class="glass modal history-modal">
+        <div class="modal-head">
+          <h2>История синхронизаций</h2>
+          <button class="glass-btn ghost" id="clearHistoryBtn">Очистить</button>
+        </div>
+        <div class="history-list" id="historyList"></div>
+        <div class="modal-actions">
+          <button class="glass-btn" id="historyCloseBtn">Закрыть</button>
         </div>
       </div>
     </div>

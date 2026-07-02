@@ -6,6 +6,8 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('api', {
   getSettings: () => ipcRenderer.invoke('get-settings'),
   saveSettings: (settings) => ipcRenderer.invoke('save-settings', settings),
+  getHistory: () => ipcRenderer.invoke('get-history'),
+  clearHistory: () => ipcRenderer.invoke('clear-history'),
   pickFolder: () => ipcRenderer.invoke('pick-folder'),
   probe: (args) => ipcRenderer.invoke('probe', args),
   listFolders: (args) => ipcRenderer.invoke('list-folders', args),
