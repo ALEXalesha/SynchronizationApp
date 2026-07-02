@@ -36,21 +36,6 @@
         </div>
 
         <div class="topbar-right">
-          <label class="size-toggle" title="Подсчёт размеров и числа файлов в фоне. «До 300k» — безопасный предел; «Все» — без ограничения (нужно больше памяти).">
-            <span>Размеры</span>
-            <select id="sizeMode">
-              <option value="off">Выкл</option>
-              <option value="capped">До 300k</option>
-              <option value="full">Все</option>
-            </select>
-          </label>
-          <label class="sort-field">
-            <span>Сортировка</span>
-            <select id="sortMode">
-              <option value="name">По имени</option>
-              <option value="date">По дате</option>
-            </select>
-          </label>
           <button class="glass-btn ghost" id="historyBtn" title="История синхронизаций">
             🕘 История
           </button>
@@ -60,11 +45,26 @@
         </div>
       </header>
 
-      <!-- Статус-бар: фоновая загрузка размеров и файлов -->
+      <!-- Статус-бар: фоновая загрузка + настройки отображения -->
       <div class="glass statusbar" id="statusBar">
         <span class="sb-dot" id="sbDot"></span>
         <span class="sb-text" id="sbText">Выберите папки внизу</span>
         <span class="sb-summary" id="sbSummary"></span>
+        <label class="size-toggle" title="Подсчёт размеров и числа файлов в фоне. «До 300k» — безопасный предел; «Все» — без ограничения (нужно больше памяти).">
+          <span>Размеры</span>
+          <select id="sizeMode">
+            <option value="off">Выкл</option>
+            <option value="capped">До 300k</option>
+            <option value="full">Все</option>
+          </select>
+        </label>
+        <label class="sort-field" title="Порядок в дереве">
+          <span>Сортировка</span>
+          <select id="sortMode">
+            <option value="name">По имени</option>
+            <option value="date">По дате</option>
+          </select>
+        </label>
         <div class="sb-bar" id="sbBar" hidden><span></span></div>
       </div>
 
