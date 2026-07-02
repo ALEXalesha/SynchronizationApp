@@ -671,16 +671,15 @@ async function runSync() {
     overwrite: el.previewSummary.querySelector('.stat.overwrite .num'),
     trash: el.previewSummary.querySelector('.stat.trash .num'),
   };
-  const doneBy = { copy: 0, overwrite: 0, trash: 0 };
-
-  const unsubscribe = window.api.onSyncProgress(({ done, total, action, path }) => {
+  const unsubscribe = window.api.onSyncProgress(({ done, total, action, path, by }) => {
     const pct = total ? Math.round((done / total) * 100) : 100;
     el.progressFill.style.width = `${pct}%`;
     const verb = { copy: 'копирую', overwrite: 'обновляю', trash: 'удаляю' }[action] || '';
     el.progressText.textContent = `${done}/${total} · ${verb} ${path}`;
-    if (numEls[action]) {
-      doneBy[action] += 1;
-      numEls[action].textContent = `${doneBy[action]}/${lastPreviewTotals[action]}`;
+    if (by) {
+      if (numEls.copy) numEls.copy.textContent = `${by.copy}/${lastPreviewTotals.copy}`;
+      if (numEls.overwrite) numEls.overwrite.textContent = `${by.overwrite}/${lastPreviewTotals.overwrite}`;
+      if (numEls.trash) numEls.trash.textContent = `${by.trash}/${lastPreviewTotals.trash}`;
     }
   });
 
