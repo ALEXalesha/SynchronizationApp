@@ -36,15 +36,18 @@
         </div>
 
         <div class="topbar-right">
-          <span class="scan-status" id="scanStatus" hidden>
-            <span class="spinner"></span>
-            <span id="scanStatusText">Сканирую…</span>
-          </span>
           <button class="glass-btn ghost" id="refreshBtn" title="Пересканировать папки">
             ⟳ Обновить
           </button>
         </div>
       </header>
+
+      <!-- Статус-бар: фоновая загрузка размеров и файлов -->
+      <div class="glass statusbar" id="statusBar">
+        <span class="sb-dot" id="sbDot"></span>
+        <span class="sb-text" id="sbText">Выберите папки внизу</span>
+        <span class="sb-summary" id="sbSummary"></span>
+      </div>
 
       <!-- Две панели со списком папок -->
       <section class="panels">
@@ -53,12 +56,13 @@
             <h2>Локально</h2>
             <span class="panel-path" id="localPathLabel">путь не выбран</span>
           </div>
-          <div class="list-head">
+          <div class="list-head" data-side="local">
             <label class="check-all">
-              <input type="checkbox" id="selectAll" />
+              <input type="checkbox" class="select-all" />
               <span>Выбрать все</span>
             </label>
-            <span class="selected-count" id="selectedCount">выбрано: 0</span>
+            <span class="selected-count">выбрано: 0</span>
+            <span class="hint">отмечайте на стороне-источнике</span>
           </div>
           <ul class="folder-list" id="localList"></ul>
         </div>
@@ -68,8 +72,13 @@
             <h2>Сеть</h2>
             <span class="panel-path" id="networkPathLabel">путь не выбран</span>
           </div>
-          <div class="list-head muted-head">
-            <span class="hint">Синхронизируются папки, отмеченные слева</span>
+          <div class="list-head" data-side="network">
+            <label class="check-all">
+              <input type="checkbox" class="select-all" />
+              <span>Выбрать все</span>
+            </label>
+            <span class="selected-count">выбрано: 0</span>
+            <span class="hint">отмечайте на стороне-источнике</span>
           </div>
           <ul class="folder-list" id="networkList"></ul>
         </div>

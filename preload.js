@@ -15,4 +15,18 @@ contextBridge.exposeInMainWorld('api', {
     ipcRenderer.on('sync-progress', listener);
     return () => ipcRenderer.removeListener('sync-progress', listener);
   },
+  startCrawl: (args) => ipcRenderer.invoke('start-crawl', args),
+  onCrawl: (callbacks) => {
+    const cached = (_e, d) => callbacks.onCached && callbacks.onCached(d);
+    const progress = (_e, d) => callbacks.onProgress && callbacks.onProgress(d);
+    const done = (_e, d) => callbacks.onDone && callbacks.onDone(d);
+    ipcRenderer.on('crawl-cached', cached);
+    ipcRenderer.on('crawl-progress', progress);
+    ipcRenderer.on('crawl-done', done);
+    return () => {
+      ipcRenderer.removeListener('crawl-cached', cached);
+      ipcRenderer.removeListener('crawl-progress', progress);
+      ipcRenderer.removeListener('crawl-done', done);
+    };
+  },
 });

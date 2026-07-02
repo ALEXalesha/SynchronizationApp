@@ -8,19 +8,20 @@ const state = {
   roots: [], // дерево узлов верхнего уровня
   marks: new Map(), // relPath -> 'include' | 'exclude' (только неизбыточные метки)
   expanded: new Set(), // relPath развёрнутых узлов
+  sizeMap: new Map(), // relPath -> { sizeLocal, cntLocal, sizeNetwork, cntNetwork }
   scanGen: 0,
 };
 
-// Узел: { name, relPath, hasLocal, hasNetwork, loaded, loading, isLeaf, children }
+// Узел: { name, relPath, isDir, hasLocal, hasNetwork, loaded, loading, children }
 function makeNode(dto) {
   return {
     name: dto.name,
     relPath: dto.relPath,
+    isDir: dto.isDir,
     hasLocal: dto.hasLocal,
     hasNetwork: dto.hasNetwork,
     loaded: false,
     loading: false,
-    isLeaf: false,
     children: [],
   };
 }
@@ -33,13 +34,14 @@ const el = {
   networkPathLabel: document.getElementById('networkPathLabel'),
   localList: document.getElementById('localList'),
   networkList: document.getElementById('networkList'),
-  selectAll: document.getElementById('selectAll'),
-  selectedCount: document.getElementById('selectedCount'),
   refreshBtn: document.getElementById('refreshBtn'),
   syncBtn: document.getElementById('syncBtn'),
   direction: document.getElementById('direction'),
-  scanStatus: document.getElementById('scanStatus'),
-  scanStatusText: document.getElementById('scanStatusText'),
+  heads: Array.from(document.querySelectorAll('.list-head[data-side]')),
+  selectAlls: Array.from(document.querySelectorAll('.select-all')),
+  sbDot: document.getElementById('sbDot'),
+  sbText: document.getElementById('sbText'),
+  sbSummary: document.getElementById('sbSummary'),
   modal: document.getElementById('modal'),
   modalTitle: document.getElementById('modalTitle'),
   previewSummary: document.getElementById('previewSummary'),
@@ -57,28 +59,31 @@ function escapeHtml(s) {
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
   }[c]));
 }
+function formatSize(bytes) {
+  if (bytes == null) return '';
+  if (bytes === 0) return '0 Б';
+  const u = ['Б', 'КБ', 'МБ', 'ГБ', 'ТБ'];
+  const i = Math.floor(Math.log(bytes) / Math.log(1024));
+  const v = bytes / Math.pow(1024, i);
+  return `${v.toFixed(v < 10 && i > 0 ? 1 : 0)} ${u[i]}`;
+}
+function fmtNum(n) {
+  return n.toLocaleString('ru-RU');
+}
 
-// Индикатор загрузки с учётом нескольких одновременных операций.
-let loadingCount = 0;
-function beginLoading(text) {
-  loadingCount += 1;
-  setScanStatus(text);
+// Сторона-источник (там показываем чекбоксы).
+function sourceSide() {
+  return state.direction === 'toNetwork' ? 'local' : 'network';
 }
-function endLoading() {
-  loadingCount = Math.max(0, loadingCount - 1);
-  if (loadingCount === 0) setScanStatus('');
-}
-function setScanStatus(text) {
-  if (text) {
-    el.scanStatusText.textContent = text;
-    el.scanStatus.hidden = false;
-  } else {
-    el.scanStatus.hidden = true;
-  }
+
+// ---- Статус-бар ----
+function setStatus(kind, text, summary = '') {
+  el.sbDot.className = 'sb-dot ' + kind; // busy | done | idle | error
+  el.sbText.textContent = text;
+  el.sbSummary.textContent = summary;
 }
 
 // ---- Модель выбора (трёхпозиционная) ----
-// Включённость наследуется от ближайшего отмеченного предка; по умолчанию — нет.
 function inheritedIncluded(relPath) {
   const parts = relPath.split('/');
   for (let i = parts.length - 1; i >= 1; i--) {
@@ -99,7 +104,6 @@ function hasDescendantMark(relPath) {
   }
   return false;
 }
-// Состояние чекбокса узла: 'checked' | 'unchecked' | 'partial'.
 function nodeCheckState(relPath) {
   if (hasDescendantMark(relPath)) return 'partial';
   return isIncluded(relPath) ? 'checked' : 'unchecked';
@@ -122,7 +126,6 @@ async function pickFolder(side) {
   persist();
   await refresh({ force: true });
 }
-
 function setPath(side, dir) {
   if (side === 'local') {
     state.localPath = dir;
@@ -134,7 +137,6 @@ function setPath(side, dir) {
     el.networkPathLabel.textContent = dir || 'путь не выбран';
   }
 }
-
 document.querySelectorAll('[data-pick]').forEach((btn) => {
   btn.addEventListener('click', () => pickFolder(btn.dataset.pick));
 });
@@ -145,8 +147,9 @@ function setDirection(dir) {
   el.direction.querySelectorAll('.dir-btn').forEach((b) => {
     b.classList.toggle('active', b.dataset.dir === dir);
   });
+  updateHeads();
+  renderTree(); // чекбоксы переезжают на сторону-источник
 }
-
 el.direction.addEventListener('click', (e) => {
   const btn = e.target.closest('.dir-btn');
   if (!btn) return;
@@ -154,13 +157,25 @@ el.direction.addEventListener('click', (e) => {
   persist();
 });
 
+// Показываем «Выбрать все» только на стороне-источнике, на другой — подсказку.
+function updateHeads() {
+  const src = sourceSide();
+  for (const head of el.heads) {
+    const isSrc = head.dataset.side === src;
+    head.querySelector('.check-all').style.display = isSrc ? '' : 'none';
+    head.querySelector('.selected-count').style.display = isSrc ? '' : 'none';
+    head.querySelector('.hint').style.display = isSrc ? 'none' : '';
+  }
+}
+
 // ---- Загрузка дерева ----
 async function refresh({ force = false } = {}) {
   if (!state.localPath && !state.networkPath) return;
   const gen = ++state.scanGen;
 
-  state.expanded.clear(); // на обновлении сворачиваем всё
-  setScanStatus('Читаю список папок…');
+  state.expanded.clear();
+  state.sizeMap.clear();
+  setStatus('busy', 'Читаю список папок…');
 
   const items = await window.api.listFolders({
     localPath: state.localPath,
@@ -172,23 +187,23 @@ async function refresh({ force = false } = {}) {
 
   state.roots = items.map(makeNode);
 
-  // Отброс меток, чьей папки больше нет на верхнем уровне (грубая чистка).
   const rootNames = new Set(state.roots.map((n) => n.relPath));
   for (const key of [...state.marks.keys()]) {
     const top = key.split('/')[0];
     if (!rootNames.has(top)) state.marks.delete(key);
   }
 
-  setScanStatus('');
   renderTree();
+
+  // Фоновая загрузка размеров и файлов (не блокирует интерфейс).
+  setStatus('busy', 'Загрузка размеров и файлов…', '');
+  window.api.startCrawl({ localPath: state.localPath, networkPath: state.networkPath });
 }
 
 async function loadChildren(node) {
   if (node.loaded || node.loading) return;
   node.loading = true;
-  beginLoading(`Загружаю «${node.name}»…`);
   renderTree();
-
   try {
     const items = await window.api.listFolders({
       localPath: state.localPath,
@@ -196,17 +211,16 @@ async function loadChildren(node) {
       relPath: node.relPath,
     });
     node.children = items.map(makeNode);
-    node.isLeaf = items.length === 0;
     node.loaded = true;
   } finally {
     node.loading = false;
-    endLoading();
   }
   renderTree();
 }
 
-// ---- Развернуть / свернуть ----
+// ---- Развернуть / свернуть (только для папок) ----
 async function toggleExpand(node) {
+  if (!node.isDir) return;
   if (state.expanded.has(node.relPath)) {
     state.expanded.delete(node.relPath);
     renderTree();
@@ -217,22 +231,17 @@ async function toggleExpand(node) {
   else renderTree();
 }
 
-// ---- Отметка ветки (клик переключает включённость целиком) ----
+// ---- Отметка (клик переключает включённость целиком; работает и для файлов) ----
 function toggleCheck(node) {
   const rel = node.relPath;
-  const want = !isIncluded(rel); // новое желаемое состояние ветки
+  const want = !isIncluded(rel);
   const inherited = inheritedIncluded(rel);
 
-  // Вложенные метки теперь избыточны — вся ветка следует за этим узлом.
   for (const k of [...state.marks.keys()]) {
     if (k !== rel && k.startsWith(rel + '/')) state.marks.delete(k);
   }
-
-  if (want === inherited) {
-    state.marks.delete(rel); // совпадает с унаследованным — метка не нужна
-  } else {
-    state.marks.set(rel, want ? 'include' : 'exclude');
-  }
+  if (want === inherited) state.marks.delete(rel);
+  else state.marks.set(rel, want ? 'include' : 'exclude');
   renderTree();
 }
 
@@ -252,37 +261,73 @@ function renderTree() {
   }
 
   walk(state.roots, 0);
-
   el.localList.scrollTop = lScroll;
   el.networkList.scrollTop = rScroll;
   updateControls();
 }
 
+const CHILD_LIMIT = 500;
+
 function walk(nodes, depth) {
   for (const node of nodes) {
-    el.localList.appendChild(buildRow(node, depth, 'local', true));
-    el.networkList.appendChild(buildRow(node, depth, 'network', false));
-    if (state.expanded.has(node.relPath) && node.loaded) {
-      walk(node.children, depth + 1);
+    el.localList.appendChild(buildRow(node, depth, 'local'));
+    el.networkList.appendChild(buildRow(node, depth, 'network'));
+
+    if (node.isDir && state.expanded.has(node.relPath) && node.loaded) {
+      if (node.children.length === 0) {
+        appendPlaceholder('(пусто)', depth + 1);
+      } else {
+        const shown = node.children.slice(0, CHILD_LIMIT);
+        walk(shown, depth + 1);
+        const hidden = node.children.length - shown.length;
+        if (hidden > 0) appendPlaceholder(`…ещё ${hidden}`, depth + 1);
+      }
     }
   }
 }
 
-function buildRow(node, depth, side, interactive) {
+function appendPlaceholder(text, depth) {
+  const make = () => {
+    const li = document.createElement('li');
+    li.className = 'folder-row tree-row placeholder';
+    li.style.paddingLeft = `${12 + depth * 18}px`;
+    li.textContent = text;
+    return li;
+  };
+  el.localList.appendChild(make());
+  el.networkList.appendChild(make());
+}
+
+// Текст метаданных строки (размер/счёт) для стороны, из sizeMap.
+function metaFor(node, side) {
+  const present = side === 'local' ? node.hasLocal : node.hasNetwork;
+  if (!present) return { text: side === 'local' ? 'нет локально' : 'нет в сети', dim: true };
+  const s = state.sizeMap.get(node.relPath);
+  if (!s) return { text: '', dim: true };
+  const size = side === 'local' ? s.sizeLocal : s.sizeNetwork;
+  const cnt = side === 'local' ? s.cntLocal : s.cntNetwork;
+  if (size == null) return { text: '', dim: true };
+  if (node.isDir) return { text: `${fmtNum(cnt)} файлов · ${formatSize(size)}`, dim: false };
+  return { text: formatSize(size), dim: false };
+}
+
+function buildRow(node, depth, side) {
+  const interactive = side === sourceSide();
   const li = document.createElement('li');
   li.className = 'folder-row tree-row';
+  if (!node.isDir) li.classList.add('file-row');
   li.style.paddingLeft = `${12 + depth * 18}px`;
 
   const present = side === 'local' ? node.hasLocal : node.hasNetwork;
   if (!present) li.classList.add('absent-side');
 
-  // Каретка разворачивания.
+  // Каретка: у папок всегда, у файлов — пустой отступ.
   const caret = document.createElement('span');
   caret.className = 'caret';
-  if (node.loading) {
-    caret.classList.add('mini-spin');
-  } else if (node.loaded && node.isLeaf) {
+  if (!node.isDir) {
     caret.classList.add('leaf');
+  } else if (node.loading) {
+    caret.classList.add('mini-spin');
   } else {
     caret.textContent = state.expanded.has(node.relPath) ? '▾' : '▸';
     caret.addEventListener('click', (e) => {
@@ -292,7 +337,7 @@ function buildRow(node, depth, side, interactive) {
   }
   li.appendChild(caret);
 
-  // Чекбокс (только левая панель).
+  // Чекбокс — у всего (папки и файлы) на стороне-источнике.
   if (interactive) {
     const cs = nodeCheckState(node.relPath);
     if (cs === 'checked') li.classList.add('checked');
@@ -310,11 +355,13 @@ function buildRow(node, depth, side, interactive) {
 
   const info = document.createElement('div');
   info.className = 'folder-info';
-  const nameTag = present ? '' : side === 'local' ? ' · нет локально' : ' · нет в сети';
-  info.innerHTML = `<span class="folder-name">${escapeHtml(node.name)}<span class="side-note">${nameTag}</span></span>`;
+  const icon = node.isDir ? '' : '<span class="file-icon">📄</span>';
+  const meta = metaFor(node, side);
+  info.innerHTML =
+    `<span class="folder-name">${icon}${escapeHtml(node.name)}</span>` +
+    `<span class="row-meta ${meta.dim ? 'dim' : ''}">${meta.text}</span>`;
   li.appendChild(info);
 
-  // Клик по строке слева = отметить ветку.
   if (interactive) {
     li.addEventListener('click', () => toggleCheck(node));
   }
@@ -322,25 +369,30 @@ function buildRow(node, depth, side, interactive) {
 }
 
 // ---- Выбор всех ----
-el.selectAll.addEventListener('change', () => {
+function onSelectAll(e) {
   state.marks.clear();
-  if (el.selectAll.checked) {
+  if (e.target.checked) {
     state.roots.forEach((n) => state.marks.set(n.relPath, 'include'));
   }
   renderTree();
-});
+}
+el.selectAlls.forEach((box) => box.addEventListener('change', onSelectAll));
 
 function updateControls() {
   const { folders, excludes } = collectSelection();
   const exNote = excludes.length ? `, исключено: ${excludes.length}` : '';
-  el.selectedCount.textContent = `выбрано: ${folders.length}${exNote}`;
-  el.selectAll.checked =
+  const allChecked =
     state.roots.length > 0 && state.roots.every((n) => state.marks.get(n.relPath) === 'include');
+
+  for (const head of el.heads) {
+    head.querySelector('.selected-count').textContent = `выбрано: ${folders.length}${exNote}`;
+  }
+  el.selectAlls.forEach((b) => {
+    b.checked = allChecked;
+  });
   el.syncBtn.disabled = folders.length === 0 || !state.localPath || !state.networkPath;
 }
 
-// Метки полностью описывают выбор: 'include' — корни веток, 'exclude' — дырки внутри них.
-// (Избыточные метки не хранятся, поэтому каждая include — корень, каждая exclude — дырка.)
 function collectSelection() {
   const folders = [];
   const excludes = [];
@@ -353,6 +405,48 @@ function collectSelection() {
 
 el.refreshBtn.addEventListener('click', () => refresh({ force: true }));
 
+// ---- Приём результатов фонового обхода ----
+let sizeTimer = null;
+function scheduleSizeRender() {
+  if (sizeTimer) return;
+  sizeTimer = setTimeout(() => {
+    sizeTimer = null;
+    renderTree();
+  }, 400);
+}
+function mergeSizes(entries) {
+  for (const e of entries) {
+    const cur =
+      state.sizeMap.get(e.relPath) ||
+      { sizeLocal: null, cntLocal: null, sizeNetwork: null, cntNetwork: null };
+    if (e.sizeLocal != null) {
+      cur.sizeLocal = e.sizeLocal;
+      cur.cntLocal = e.cntLocal;
+    }
+    if (e.sizeNetwork != null) {
+      cur.sizeNetwork = e.sizeNetwork;
+      cur.cntNetwork = e.cntNetwork;
+    }
+    state.sizeMap.set(e.relPath, cur);
+  }
+  scheduleSizeRender();
+}
+
+window.api.onCrawl({
+  onCached: ({ entries }) => {
+    mergeSizes(entries);
+  },
+  onProgress: ({ scanned, entries }) => {
+    mergeSizes(entries);
+    setStatus('busy', 'Загрузка размеров и файлов…', `${fmtNum(scanned)} объектов`);
+  },
+  onDone: ({ scanned, ok }) => {
+    if (ok) setStatus('done', 'Готово', `${fmtNum(scanned)} объектов`);
+    else setStatus('error', 'Не удалось загрузить размеры');
+    renderTree();
+  },
+});
+
 // ---- Предпросмотр и синхронизация ----
 el.syncBtn.addEventListener('click', openPreview);
 
@@ -361,7 +455,7 @@ async function openPreview() {
   if (folders.length === 0) return;
 
   el.modalTitle.textContent = 'Предпросмотр синхронизации';
-  el.previewSummary.innerHTML = '<div class="empty">Сканирую выбранные папки…</div>';
+  el.previewSummary.innerHTML = '<div class="empty">Сканирую выбранное…</div>';
   el.previewList.innerHTML = '';
   el.progressWrap.hidden = true;
   el.confirmBtn.disabled = true;
@@ -408,8 +502,7 @@ el.cancelBtn.addEventListener('click', () => {
   el.modal.hidden = true;
 });
 
-// Кнопка подтверждения: запустить синхронизацию или закрыть окно после завершения.
-let confirmMode = 'run'; // 'run' | 'close'
+let confirmMode = 'run';
 el.confirmBtn.addEventListener('click', () => {
   if (confirmMode === 'close') {
     el.modal.hidden = true;
@@ -456,8 +549,9 @@ async function runSync() {
   }
 }
 
-// ---- Старт: восстановление сохранённых путей ----
+// ---- Старт ----
 (async function init() {
+  updateHeads();
   const s = (await window.api.getSettings()) || {};
   if (s.direction) setDirection(s.direction);
   if (s.localPath) setPath('local', s.localPath);

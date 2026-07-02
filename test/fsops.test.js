@@ -7,7 +7,14 @@ const fsp = fs.promises;
 const os = require('node:os');
 const path = require('node:path');
 
-const { scanFiles, listTopFolders, listTopFolderNames, applyPlan } = require('../src/fsops');
+const {
+  scanFiles,
+  listTopFolders,
+  listTopFolderNames,
+  listChildren,
+  crawlTree,
+  applyPlan,
+} = require('../src/fsops');
 const { planSync } = require('../src/sync');
 const { pruneDescendants } = require('../src/paths');
 
@@ -94,6 +101,37 @@ test('синхронизация вложенной ветки не трогае
     await fsp.readFile(path.join(dst, 'pics/photo.txt'), 'utf8'),
     'DST-pic-different'
   );
+});
+
+test('listChildren возвращает и папки, и файлы с пометкой типа', async () => {
+  const dir = await tmpDir();
+  await writeFile(dir, 'sub/x.txt', '1');
+  await writeFile(dir, 'file.txt', '2');
+  const children = await listChildren(dir);
+  const byName = Object.fromEntries(children.map((c) => [c.name, c.isDir]));
+  assert.strictEqual(byName['sub'], true);
+  assert.strictEqual(byName['file.txt'], false);
+  assert.strictEqual(children.length, 2);
+});
+
+test('crawlTree считает размеры и количество файлов по узлам', async () => {
+  const dir = await tmpDir();
+  await writeFile(dir, 'docs/a.txt', 'AAAAA'); // 5 байт
+  await writeFile(dir, 'docs/sub/b.txt', 'BB'); // 2 байта
+  await writeFile(dir, 'root.txt', 'CCC'); // 3 байта
+
+  const seen = new Map();
+  const total = await crawlTree(dir, '', (rel, isDir, size, cnt) => {
+    seen.set(rel, { isDir, size, cnt });
+  });
+
+  assert.strictEqual(total.size, 10);
+  assert.strictEqual(total.count, 3);
+  assert.strictEqual(seen.get('docs').isDir, true);
+  assert.strictEqual(seen.get('docs').size, 7); // 5 + 2
+  assert.strictEqual(seen.get('docs').cnt, 2);
+  assert.strictEqual(seen.get('root.txt').isDir, false);
+  assert.strictEqual(seen.get('root.txt').size, 3);
 });
 
 test('scanFiles пропускает исключённые ветки', async () => {

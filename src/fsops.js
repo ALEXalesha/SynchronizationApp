@@ -69,6 +69,58 @@ async function listTopFolderNames(dir) {
     .sort((a, b) => a.localeCompare(b));
 }
 
+// Прямые дети папки: и подпапки, и файлы (без рекурсии). Быстро — один readdir.
+// Возвращает [{ name, isDir }].
+async function listChildren(dir) {
+  let dirents;
+  try {
+    dirents = await fsp.readdir(dir, { withFileTypes: true });
+  } catch (err) {
+    if (err.code === 'ENOENT') return [];
+    throw err;
+  }
+  const out = [];
+  for (const d of dirents) {
+    if (d.isSymbolicLink()) continue;
+    if (d.isDirectory()) out.push({ name: d.name, isDir: true });
+    else if (d.isFile()) out.push({ name: d.name, isDir: false });
+  }
+  return out;
+}
+
+// Полный рекурсивный обход дерева для подсчёта размеров.
+// Для каждого узла вызывает onEntry(relPath, isDir, size, fileCount).
+// Для файла size — размер файла, fileCount = 1. Для папки — агрегаты по вложенному.
+// Возвращает агрегат { size, count } для переданного rel.
+async function crawlTree(root, rel, onEntry) {
+  let dirents;
+  try {
+    dirents = await fsp.readdir(path.join(root, rel), { withFileTypes: true });
+  } catch (err) {
+    if (err.code === 'ENOENT') return { size: 0, count: 0 };
+    throw err;
+  }
+
+  let size = 0;
+  let count = 0;
+  for (const d of dirents) {
+    if (d.isSymbolicLink()) continue;
+    const childRel = rel ? `${rel}/${d.name}` : d.name;
+    if (d.isDirectory()) {
+      const sub = await crawlTree(root, childRel, onEntry);
+      await onEntry(childRel, true, sub.size, sub.count);
+      size += sub.size;
+      count += sub.count;
+    } else if (d.isFile()) {
+      const st = await fsp.stat(path.join(root, childRel));
+      await onEntry(childRel, false, st.size, 1);
+      size += st.size;
+      count += 1;
+    }
+  }
+  return { size, count };
+}
+
 async function ensureDir(dir) {
   await fsp.mkdir(dir, { recursive: true });
 }
@@ -114,6 +166,8 @@ module.exports = {
   scanFiles,
   listTopFolders,
   listTopFolderNames,
+  listChildren,
+  crawlTree,
   applyPlan,
   copyFile,
   ensureDir,
