@@ -8,7 +8,8 @@ const path = require('path');
 // Возвращает массив записей { path, size, mtimeMs }, path — относительный,
 // с разделителем '/'. Символические ссылки пропускаются (не ходим по ним).
 // excludes — Set путей папок (относительно dir), которые нужно пропустить целиком.
-async function scanFiles(dir, rel = '', out = [], excludes = null) {
+// onFile() — необязательный колбэк на каждый найденный файл (прогресс/отмена).
+async function scanFiles(dir, rel = '', out = [], excludes = null, onFile = null) {
   let dirents;
   try {
     dirents = await fsp.readdir(path.join(dir, rel), { withFileTypes: true });
@@ -22,10 +23,11 @@ async function scanFiles(dir, rel = '', out = [], excludes = null) {
     if (excludes && excludes.has(childRel)) continue; // исключённая ветка
     if (dirent.isSymbolicLink()) continue;
     if (dirent.isDirectory()) {
-      await scanFiles(dir, childRel, out, excludes);
+      await scanFiles(dir, childRel, out, excludes, onFile);
     } else if (dirent.isFile()) {
       const stat = await fsp.stat(path.join(dir, childRel));
       out.push({ path: childRel, size: stat.size, mtimeMs: stat.mtimeMs });
+      if (onFile) onFile();
     }
   }
   return out;

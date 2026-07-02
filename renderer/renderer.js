@@ -468,13 +468,33 @@ async function openPreview() {
   confirmMode = 'run';
   el.modal.hidden = false;
 
-  const result = await window.api.preview({
-    localPath: state.localPath,
-    networkPath: state.networkPath,
-    folders,
-    excludes,
-    direction: state.direction,
+  // Живой счётчик просканированных файлов.
+  const unsub = window.api.onPreviewProgress(({ scanned }) => {
+    el.previewSummary.innerHTML = `<div class="empty">Сканирую выбранное… ${scanned.toLocaleString('ru-RU')} файлов</div>`;
   });
+
+  let result;
+  try {
+    result = await window.api.preview({
+      localPath: state.localPath,
+      networkPath: state.networkPath,
+      folders,
+      excludes,
+      direction: state.direction,
+    });
+  } catch (err) {
+    result = { error: err.message };
+  } finally {
+    unsub();
+  }
+
+  if (result.aborted) return; // окно уже закрыто отменой
+  if (result.error) {
+    el.previewSummary.innerHTML = `<div class="empty">Не удалось просканировать: ${escapeHtml(result.error)}.<br>Проверьте связь с сетевой папкой и повторите.</div>`;
+    el.previewList.innerHTML = '';
+    el.confirmBtn.disabled = true;
+    return;
+  }
 
   renderPreview(result);
   el.confirmBtn.disabled =
@@ -504,6 +524,7 @@ function renderPreview({ perFolder, totals }) {
 }
 
 el.cancelBtn.addEventListener('click', () => {
+  window.api.cancelPreview(); // остановить идущий скан, если он есть
   el.modal.hidden = true;
 });
 

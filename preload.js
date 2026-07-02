@@ -10,6 +10,12 @@ contextBridge.exposeInMainWorld('api', {
   probe: (args) => ipcRenderer.invoke('probe', args),
   listFolders: (args) => ipcRenderer.invoke('list-folders', args),
   preview: (args) => ipcRenderer.invoke('preview', args),
+  cancelPreview: () => ipcRenderer.invoke('cancel-preview'),
+  onPreviewProgress: (callback) => {
+    const listener = (_event, data) => callback(data);
+    ipcRenderer.on('preview-progress', listener);
+    return () => ipcRenderer.removeListener('preview-progress', listener);
+  },
   sync: (args) => ipcRenderer.invoke('sync', args),
   onSyncProgress: (callback) => {
     const listener = (_event, data) => callback(data);
