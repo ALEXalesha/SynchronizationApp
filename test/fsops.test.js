@@ -191,6 +191,32 @@ test('applyPlan не падает на ошибке файла, копит failu
   assert.strictEqual(res.failures[0].code, 'EPERM');
 });
 
+test('applyPlan параллельно обрабатывает много файлов корректно', async () => {
+  const src = await tmpDir();
+  const dst = await tmpDir();
+  for (let i = 0; i < 200; i += 1) await writeFile(src, `sub${i % 7}/f${i}.txt`, `data-${i}`);
+  for (let i = 0; i < 50; i += 1) await writeFile(dst, `old/x${i}.txt`, 'stale'); // лишние → trash
+
+  const plan = planSync(await scanFiles(src), await scanFiles(dst));
+  const trashed = [];
+  const res = await applyPlan(src, dst, plan, async (abs) => {
+    trashed.push(abs);
+    await fsp.rm(abs);
+  });
+
+  assert.strictEqual(res.failures.length, 0);
+  assert.strictEqual(res.done, res.total);
+  // Все 200 файлов на месте с верным содержимым.
+  for (let i = 0; i < 200; i += 1) {
+    assert.strictEqual(await fsp.readFile(path.join(dst, `sub${i % 7}/f${i}.txt`), 'utf8'), `data-${i}`);
+  }
+  // Все 50 лишних файлов удалены.
+  assert.strictEqual(trashed.length, 50);
+  for (let i = 0; i < 50; i += 1) {
+    assert.strictEqual(fs.existsSync(path.join(dst, `old/x${i}.txt`)), false);
+  }
+});
+
 test('applyPlan копирует, перезаписывает и удаляет (в мок-корзину)', async () => {
   const src = await tmpDir();
   const dst = await tmpDir();

@@ -213,10 +213,35 @@ async function copyFile(srcRoot, dstRoot, relPath) {
   return true;
 }
 
+// Сколько файлов обрабатываем одновременно при синхронизации.
+// По сети это скрывает задержку на каждый файл (копирование/удаление идут пачкой).
+const APPLY_CONCURRENCY = 16;
+
+// Пул воркеров: concurrency параллельных обработчиков тянут элементы из items
+// по индексу. Не создаёт промис на каждый элемент — важно для сотен тысяч файлов.
+async function runPool(items, concurrency, worker) {
+  let i = 0;
+  const runners = [];
+  const n = Math.min(concurrency, items.length);
+  for (let c = 0; c < n; c += 1) {
+    runners.push(
+      (async () => {
+        while (i < items.length) {
+          const idx = i;
+          i += 1;
+          await worker(items[idx]);
+        }
+      })()
+    );
+  }
+  await Promise.all(runners);
+}
+
 // Выполняет план синхронизации из src.js.
 // trashFn(absPath) — функция удаления (в Электроне через Корзину/rm).
 // onProgress({ done, total, action, path }) — колбэк прогресса (необязателен).
-// Ошибка отдельного файла не обрывает синхронизацию: копится в failures.
+// Файлы обрабатываются параллельно (пул). Ошибка отдельного файла не обрывает
+// синхронизацию: копится в failures.
 async function applyPlan(srcRoot, dstRoot, plan, trashFn, onProgress = () => {}) {
   const total = plan.copy.length + plan.overwrite.length + plan.trash.length;
   let done = 0;
@@ -226,28 +251,28 @@ async function applyPlan(srcRoot, dstRoot, plan, trashFn, onProgress = () => {})
     onProgress({ done, total, action, path: relPath });
   };
 
-  const copyBatch = async (entries, action) => {
-    for (const entry of entries) {
-      try {
-        await copyFile(srcRoot, dstRoot, entry.path);
-      } catch (err) {
-        failures.push({ action, path: entry.path, code: err.code || String(err.message) });
-      }
-      report(action, entry.path);
+  const doCopy = (action) => async (entry) => {
+    try {
+      await copyFile(srcRoot, dstRoot, entry.path);
+    } catch (err) {
+      failures.push({ action, path: entry.path, code: err.code || String(err.message) });
     }
+    report(action, entry.path);
   };
 
-  await copyBatch(plan.copy, 'copy');
-  await copyBatch(plan.overwrite, 'overwrite');
-
-  for (const entry of plan.trash) {
+  const doTrash = async (entry) => {
     try {
       await trashFn(path.join(dstRoot, entry.path));
     } catch (err) {
       failures.push({ action: 'trash', path: entry.path, code: err.code || String(err.message) });
     }
     report('trash', entry.path);
-  }
+  };
+
+  // Сначала копирование/перезапись, затем удаление лишнего.
+  await runPool(plan.copy, APPLY_CONCURRENCY, doCopy('copy'));
+  await runPool(plan.overwrite, APPLY_CONCURRENCY, doCopy('overwrite'));
+  await runPool(plan.trash, APPLY_CONCURRENCY, doTrash);
 
   return { done, total, failures };
 }

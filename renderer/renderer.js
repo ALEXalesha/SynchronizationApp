@@ -13,7 +13,7 @@ const state = {
   localOk: null, // доступность папок (постоянная проверка)
   networkOk: null,
   sort: 'name', // 'name' | 'date'
-  showSizes: true, // считать ли размеры в фоне (для 500k+ можно выключить)
+  sizeMode: 'capped', // 'off' | 'capped' (до 300k) | 'full' (без лимита)
 };
 
 // Узел: { name, relPath, isDir, hasLocal, hasNetwork, loaded, loading, children }
@@ -47,7 +47,7 @@ const el = {
   localConn: document.getElementById('localConn'),
   netConn: document.getElementById('netConn'),
   sortMode: document.getElementById('sortMode'),
-  sizeToggle: document.getElementById('sizeToggle'),
+  sizeMode: document.getElementById('sizeMode'),
   progressBar: document.querySelector('.progress-bar'),
   sbDot: document.getElementById('sbDot'),
   sbText: document.getElementById('sbText'),
@@ -133,7 +133,21 @@ function persist() {
     networkPath: state.networkPath,
     direction: state.direction,
     sort: state.sort,
-    showSizes: state.showSizes,
+    sizeMode: state.sizeMode,
+  });
+}
+
+// Запускает фоновый обход с учётом режима размеров (с лимитом/без).
+function startCrawlIfEnabled() {
+  if (state.sizeMode === 'off') {
+    setStatus('idle', 'Размеры отключены');
+    return;
+  }
+  setStatus('busy', 'Загрузка размеров и файлов…', '');
+  window.api.startCrawl({
+    localPath: state.localPath,
+    networkPath: state.networkPath,
+    noLimit: state.sizeMode === 'full',
   });
 }
 
@@ -266,25 +280,19 @@ async function refresh({ force = false } = {}) {
   renderTree();
 
   // Фоновая загрузка размеров и файлов (не блокирует интерфейс).
-  if (state.showSizes) {
-    setStatus('busy', 'Загрузка размеров и файлов…', '');
-    window.api.startCrawl({ localPath: state.localPath, networkPath: state.networkPath });
-  } else {
-    setStatus('idle', 'Готово (размеры отключены)');
-  }
+  startCrawlIfEnabled();
 }
 
-el.sizeToggle.addEventListener('change', () => {
-  state.showSizes = el.sizeToggle.checked;
+el.sizeMode.addEventListener('change', () => {
+  state.sizeMode = el.sizeMode.value;
   persist();
-  if (state.showSizes) {
-    setStatus('busy', 'Загрузка размеров и файлов…', '');
-    window.api.startCrawl({ localPath: state.localPath, networkPath: state.networkPath });
-  } else {
-    window.api.stopCrawl();
+  window.api.stopCrawl(); // на всякий случай гасим текущий обход
+  if (state.sizeMode === 'off') {
     state.sizeMap.clear();
     setStatus('idle', 'Размеры отключены');
     renderTree();
+  } else {
+    startCrawlIfEnabled();
   }
 });
 
@@ -875,10 +883,12 @@ async function probeTick() {
     state.sort = s.sort;
     el.sortMode.value = s.sort;
   }
-  if (s.showSizes === false) {
-    state.showSizes = false;
-    el.sizeToggle.checked = false;
+  if (s.sizeMode === 'off' || s.sizeMode === 'capped' || s.sizeMode === 'full') {
+    state.sizeMode = s.sizeMode;
+  } else if (s.showSizes === false) {
+    state.sizeMode = 'off'; // миграция со старой настройки
   }
+  el.sizeMode.value = state.sizeMode;
   if (s.direction) setDirection(s.direction);
   if (s.localPath) setPath('local', s.localPath);
   if (s.networkPath) setPath('network', s.networkPath);

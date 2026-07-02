@@ -36,9 +36,13 @@
         </div>
 
         <div class="topbar-right">
-          <label class="size-toggle" title="Считать размеры и число файлов в фоне (для очень больших папок можно выключить)">
-            <input type="checkbox" id="sizeToggle" checked />
+          <label class="size-toggle" title="Подсчёт размеров и числа файлов в фоне. «До 300k» — безопасный предел; «Все» — без ограничения (нужно больше памяти).">
             <span>Размеры</span>
+            <select id="sizeMode">
+              <option value="off">Выкл</option>
+              <option value="capped">До 300k</option>
+              <option value="full">Все</option>
+            </select>
           </label>
           <label class="sort-field">
             <span>Сортировка</span>
