@@ -4,32 +4,63 @@ const fs = require('fs');
 const fsp = fs.promises;
 const path = require('path');
 
+// Число одновременных файловых запросов. По сети (SMB) чтение упирается в задержку
+// каждого запроса, поэтому пачка параллельных stat ускоряет обход в разы.
+const SCAN_CONCURRENCY = 32;
+
+// Ограничитель параллельности: не больше max одновременных операций.
+function createLimiter(max) {
+  let active = 0;
+  const queue = [];
+  const pump = () => {
+    while (active < max && queue.length) {
+      const { fn, resolve, reject } = queue.shift();
+      active += 1;
+      fn().then(resolve, reject).finally(() => {
+        active -= 1;
+        pump();
+      });
+    }
+  };
+  return (fn) => new Promise((resolve, reject) => {
+    queue.push({ fn, resolve, reject });
+    pump();
+  });
+}
+
 // Рекурсивно собирает список файлов внутри dir.
 // Возвращает массив записей { path, size, mtimeMs }, path — относительный,
 // с разделителем '/'. Символические ссылки пропускаются (не ходим по ним).
 // excludes — Set путей папок (относительно dir), которые нужно пропустить целиком.
 // onFile() — необязательный колбэк на каждый найденный файл (прогресс/отмена).
-async function scanFiles(dir, rel = '', out = [], excludes = null, onFile = null) {
+// Файлы читаются параллельно с ограничением SCAN_CONCURRENCY.
+async function scanFiles(dir, rel = '', out = [], excludes = null, onFile = null, run = null) {
+  const limit = run || createLimiter(SCAN_CONCURRENCY);
   let dirents;
   try {
-    dirents = await fsp.readdir(path.join(dir, rel), { withFileTypes: true });
+    dirents = await limit(() => fsp.readdir(path.join(dir, rel), { withFileTypes: true }));
   } catch (err) {
     if (err.code === 'ENOENT') return out; // папки нет — пустой список
     throw err;
   }
 
+  const tasks = [];
   for (const dirent of dirents) {
     const childRel = rel ? `${rel}/${dirent.name}` : dirent.name;
     if (excludes && excludes.has(childRel)) continue; // исключённая ветка
     if (dirent.isSymbolicLink()) continue;
     if (dirent.isDirectory()) {
-      await scanFiles(dir, childRel, out, excludes, onFile);
+      tasks.push(scanFiles(dir, childRel, out, excludes, onFile, limit));
     } else if (dirent.isFile()) {
-      const stat = await fsp.stat(path.join(dir, childRel));
-      out.push({ path: childRel, size: stat.size, mtimeMs: stat.mtimeMs });
-      if (onFile) onFile();
+      tasks.push(
+        limit(() => fsp.stat(path.join(dir, childRel))).then((stat) => {
+          out.push({ path: childRel, size: stat.size, mtimeMs: stat.mtimeMs });
+          if (onFile) onFile();
+        })
+      );
     }
   }
+  await Promise.all(tasks);
   return out;
 }
 
@@ -94,10 +125,11 @@ async function listChildren(dir) {
 // Для каждого узла вызывает onEntry(relPath, isDir, size, fileCount).
 // Для файла size — размер файла, fileCount = 1. Для папки — агрегаты по вложенному.
 // Возвращает агрегат { size, count } для переданного rel.
-async function crawlTree(root, rel, onEntry) {
+async function crawlTree(root, rel, onEntry, run = null) {
+  const limit = run || createLimiter(SCAN_CONCURRENCY);
   let dirents;
   try {
-    dirents = await fsp.readdir(path.join(root, rel), { withFileTypes: true });
+    dirents = await limit(() => fsp.readdir(path.join(root, rel), { withFileTypes: true }));
   } catch (err) {
     if (err.code === 'ENOENT') return { size: 0, count: 0 };
     throw err;
@@ -105,21 +137,29 @@ async function crawlTree(root, rel, onEntry) {
 
   let size = 0;
   let count = 0;
+  const tasks = [];
   for (const d of dirents) {
     if (d.isSymbolicLink()) continue;
     const childRel = rel ? `${rel}/${d.name}` : d.name;
     if (d.isDirectory()) {
-      const sub = await crawlTree(root, childRel, onEntry);
-      await onEntry(childRel, true, sub.size, sub.count);
-      size += sub.size;
-      count += sub.count;
+      tasks.push(
+        crawlTree(root, childRel, onEntry, limit).then(async (sub) => {
+          await onEntry(childRel, true, sub.size, sub.count);
+          size += sub.size;
+          count += sub.count;
+        })
+      );
     } else if (d.isFile()) {
-      const st = await fsp.stat(path.join(root, childRel));
-      await onEntry(childRel, false, st.size, 1);
-      size += st.size;
-      count += 1;
+      tasks.push(
+        limit(() => fsp.stat(path.join(root, childRel))).then(async (st) => {
+          await onEntry(childRel, false, st.size, 1);
+          size += st.size;
+          count += 1;
+        })
+      );
     }
   }
+  await Promise.all(tasks);
   return { size, count };
 }
 
