@@ -463,8 +463,11 @@ async function openPreview() {
   el.previewSummary.innerHTML = '<div class="empty">Сканирую выбранное…</div>';
   el.previewList.innerHTML = '';
   el.progressWrap.hidden = true;
+  el.progressText.textContent = ''; // сброс прошлого «Готово …»
+  el.progressFill.style.width = '0%';
   el.confirmBtn.disabled = true;
   el.confirmBtn.textContent = 'Выполнить';
+  el.cancelBtn.disabled = false;
   confirmMode = 'run';
   el.modal.hidden = false;
 
@@ -501,7 +504,9 @@ async function openPreview() {
     result.totals.copy + result.totals.overwrite + result.totals.trash === 0;
 }
 
+let lastPreviewTotals = { copy: 0, overwrite: 0, trash: 0 };
 function renderPreview({ perFolder, totals, destTrashable }) {
+  lastPreviewTotals = totals;
   const dirLabel = state.direction === 'toNetwork' ? 'Локально → Сеть' : 'Сеть → Локально';
   const delLabel = destTrashable ? 'в Корзину' : 'удалить';
   const warn =
@@ -553,11 +558,23 @@ async function runSync() {
   el.progressFill.style.width = '0%';
   el.progressText.textContent = 'Начинаю…';
 
+  // Живой счётчик по действиям — цифры в плашках растут по ходу работы.
+  const numEls = {
+    copy: el.previewSummary.querySelector('.stat.copy .num'),
+    overwrite: el.previewSummary.querySelector('.stat.overwrite .num'),
+    trash: el.previewSummary.querySelector('.stat.trash .num'),
+  };
+  const doneBy = { copy: 0, overwrite: 0, trash: 0 };
+
   const unsubscribe = window.api.onSyncProgress(({ done, total, action, path }) => {
     const pct = total ? Math.round((done / total) * 100) : 100;
     el.progressFill.style.width = `${pct}%`;
-    const verb = { copy: 'копирую', overwrite: 'обновляю', trash: 'в корзину' }[action] || '';
+    const verb = { copy: 'копирую', overwrite: 'обновляю', trash: 'удаляю' }[action] || '';
     el.progressText.textContent = `${done}/${total} · ${verb} ${path}`;
+    if (numEls[action]) {
+      doneBy[action] += 1;
+      numEls[action].textContent = `${doneBy[action]}/${lastPreviewTotals[action]}`;
+    }
   });
 
   try {
