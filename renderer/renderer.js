@@ -606,11 +606,10 @@ async function openPreview() {
   }
 
   renderPreview(result);
-  el.confirmBtn.disabled =
-    result.totals.copy + result.totals.overwrite + result.totals.trash === 0;
+  el.confirmBtn.disabled = result.totals.total === 0;
 }
 
-let lastPreviewTotals = { copy: 0, overwrite: 0, trash: 0 };
+let lastPreviewTotals = { move: 0, copy: 0, overwrite: 0, trash: 0, dirs: 0 };
 function renderPreview({ perFolder, totals, destTrashable }) {
   lastPreviewTotals = totals;
   const dirLabel = state.direction === 'toNetwork' ? 'Локально → Сеть' : 'Сеть → Локально';
@@ -619,11 +618,20 @@ function renderPreview({ perFolder, totals, destTrashable }) {
     !destTrashable && totals.trash > 0
       ? '<div class="preview-warn">⚠ На сетевой папке нет Корзины — лишние файлы будут удалены безвозвратно.</div>'
       : '';
+  // Перемещения показываем только когда они есть: в обычном прогоне их ноль,
+  // и лишняя плашка только мешала бы.
+  const moveStat = totals.move
+    ? `<div class="stat move"><span class="num">${totals.move}</span><span class="lbl">переместить</span></div>`
+    : '';
+  const dirsNote = totals.dirs
+    ? `<div class="preview-note">Папок привести в порядок: ${totals.dirs}</div>`
+    : '';
   el.previewSummary.innerHTML = `
+    ${moveStat}
     <div class="stat copy"><span class="num">${totals.copy}</span><span class="lbl">скопировать</span></div>
     <div class="stat overwrite"><span class="num">${totals.overwrite}</span><span class="lbl">перезаписать</span></div>
     <div class="stat trash"><span class="num">${totals.trash}</span><span class="lbl">${delLabel}</span></div>
-    ${warn}`;
+    ${dirsNote}${warn}`;
 
   el.previewList.innerHTML =
     `<li class="pv-head" style="color:var(--text-dim);font-size:12px">${dirLabel}</li>` +
@@ -631,6 +639,7 @@ function renderPreview({ perFolder, totals, destTrashable }) {
       .map((pf) => {
         const s = pf.summary;
         const parts = [];
+        if (s.move) parts.push(`→${s.move}`);
         if (s.copy) parts.push(`+${s.copy}`);
         if (s.overwrite) parts.push(`~${s.overwrite}`);
         if (s.trash) parts.push(`−${s.trash}`);
@@ -640,9 +649,25 @@ function renderPreview({ perFolder, totals, destTrashable }) {
       .join('');
 }
 
+// Во время работы левая кнопка превращается в «Остановить»: главный процесс
+// прекращает работу и откатывает уже сделанное по журналу.
+let syncRunning = false;
 el.cancelBtn.addEventListener('click', () => {
+  if (syncRunning) {
+    el.cancelBtn.disabled = true;
+    el.cancelBtn.textContent = 'Останавливаю…';
+    el.progressText.textContent = 'Останавливаю и возвращаю всё как было…';
+    el.progressBar.classList.add('indeterminate');
+    window.api.cancelSync();
+    return;
+  }
   window.api.cancelPreview(); // остановить идущий скан, если он есть
   el.modal.hidden = true;
+  if (confirmMode === 'close') {
+    // Синхронизация уже прошла — список на экране устарел.
+    confirmMode = 'run';
+    refresh({ force: true });
+  }
 });
 
 let confirmMode = 'run';
@@ -657,9 +682,21 @@ el.confirmBtn.addEventListener('click', () => {
   }
 });
 
+const ACTION_VERB = {
+  move: 'перемещаю',
+  copy: 'копирую',
+  overwrite: 'обновляю',
+  trash: 'убираю',
+  mkdir: 'создаю папку',
+  rmdir: 'убираю папку',
+  rollback: 'возвращаю как было',
+};
+
 async function runSync() {
+  syncRunning = true;
   el.confirmBtn.disabled = true;
-  el.cancelBtn.disabled = true;
+  el.cancelBtn.disabled = false;
+  el.cancelBtn.textContent = 'Остановить';
   el.progressWrap.hidden = false;
   el.progressBar.classList.remove('indeterminate');
   el.progressFill.style.width = '0%';
@@ -667,19 +704,20 @@ async function runSync() {
 
   // Живой счётчик по действиям — цифры в плашках растут по ходу работы.
   const numEls = {
+    move: el.previewSummary.querySelector('.stat.move .num'),
     copy: el.previewSummary.querySelector('.stat.copy .num'),
     overwrite: el.previewSummary.querySelector('.stat.overwrite .num'),
     trash: el.previewSummary.querySelector('.stat.trash .num'),
   };
   const unsubscribe = window.api.onSyncProgress(({ done, total, action, path, by }) => {
+    if (action === 'rollback') return; // текст уже показан кнопкой остановки
     const pct = total ? Math.round((done / total) * 100) : 100;
     el.progressFill.style.width = `${pct}%`;
-    const verb = { copy: 'копирую', overwrite: 'обновляю', trash: 'удаляю' }[action] || '';
-    el.progressText.textContent = `${done}/${total} · ${verb} ${path}`;
+    el.progressText.textContent = `${done}/${total} · ${ACTION_VERB[action] || ''} ${path}`;
     if (by) {
-      if (numEls.copy) numEls.copy.textContent = `${by.copy}/${lastPreviewTotals.copy}`;
-      if (numEls.overwrite) numEls.overwrite.textContent = `${by.overwrite}/${lastPreviewTotals.overwrite}`;
-      if (numEls.trash) numEls.trash.textContent = `${by.trash}/${lastPreviewTotals.trash}`;
+      for (const key of Object.keys(numEls)) {
+        if (numEls[key]) numEls[key].textContent = `${by[key]}/${lastPreviewTotals[key]}`;
+      }
     }
   });
 
@@ -692,21 +730,36 @@ async function runSync() {
       excludes,
       direction: state.direction,
     });
-    const perm = res && res.permanentDeletes ? ` · удалено безвозвратно: ${res.permanentDeletes}` : '';
-    if (res && res.failures) {
-      el.progressText.textContent = `Готово с ошибками: ${res.failures} файлов не удалось${perm}`;
-      const sample = (res.failuresSample || []).map((s) => escapeHtml(s)).join('<br>');
-      el.previewSummary.innerHTML = `<div class="preview-warn">⚠ Не удалось обработать ${res.failures} файлов (нет прав или заняты):<br>${sample}${res.failures > 5 ? '<br>…' : ''}</div>`;
+    el.progressBar.classList.remove('indeterminate');
+
+    if (res && res.cancelled) {
+      el.progressFill.style.width = '0%';
+      el.progressText.textContent = 'Остановлено, всё возвращено как было';
+      const lost = res.unrecoverable
+        ? `<div class="preview-warn">⚠ ${res.unrecoverable} файлов вернуть не удалось: их пришлось обработать напрямую (слишком длинный путь). Ищите их в Корзине приёмника.</div>`
+        : '';
+      el.previewSummary.innerHTML =
+        '<div class="preview-note">Синхронизация прервана. Скопированное удалено, перезаписанное и удалённое возвращено на место.</div>' + lost;
     } else {
-      el.progressText.textContent = `Готово ✓${perm}`;
+      const perm = res && res.permanentDeletes ? ` · удалено безвозвратно: ${res.permanentDeletes}` : '';
+      if (res && res.failures) {
+        el.progressText.textContent = `Готово с ошибками: ${res.failures} файлов не удалось${perm}`;
+        const sample = (res.failuresSample || []).map((s) => escapeHtml(s)).join('<br>');
+        el.previewSummary.innerHTML = `<div class="preview-warn">⚠ Не удалось обработать ${res.failures} файлов (нет прав или заняты):<br>${sample}${res.failures > 5 ? '<br>…' : ''}</div>`;
+      } else {
+        el.progressText.textContent = `Готово ✓${perm}`;
+      }
     }
     el.confirmBtn.textContent = 'Закрыть';
     el.confirmBtn.disabled = false;
     confirmMode = 'close';
   } catch (err) {
     el.progressText.textContent = `Ошибка: ${err.message}`;
-    el.cancelBtn.disabled = false;
+    el.progressBar.classList.remove('indeterminate');
   } finally {
+    syncRunning = false;
+    el.cancelBtn.textContent = 'Отмена';
+    el.cancelBtn.disabled = false;
     unsubscribe();
   }
 }
@@ -748,6 +801,7 @@ function renderHistory(list) {
       const dir = run.direction === 'toNetwork' ? 'Локально → Сеть' : 'Сеть → Локально';
       const t = run.totals || { copy: 0, overwrite: 0, trash: 0 };
       const parts = [];
+      if (t.move) parts.push(`<span class="hc-move">→${t.move}</span>`);
       if (t.copy) parts.push(`<span class="hc-copy">+${t.copy}</span>`);
       if (t.overwrite) parts.push(`<span class="hc-over">~${t.overwrite}</span>`);
       if (t.trash) parts.push(`<span class="hc-trash">−${t.trash}</span>`);
@@ -761,7 +815,7 @@ function renderHistory(list) {
 
       const files = (run.files || [])
         .map((f) => {
-          const sym = { trash: '−', overwrite: '~', copy: '+' }[f.action] || '';
+          const sym = { trash: '−', overwrite: '~', copy: '+', move: '→' }[f.action] || '';
           return `<div class="hist-file ${f.action}">${sym} ${escapeHtml(f.path)}</div>`;
         })
         .join('');

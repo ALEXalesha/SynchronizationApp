@@ -629,6 +629,15 @@ input[type="checkbox"]:indeterminate::after {
 .stat.trash .num {
   color: var(--danger);
 }
+.stat.move .num {
+  color: var(--ok);
+}
+
+.preview-note {
+  flex-basis: 100%;
+  font-size: 12px;
+  color: var(--text-dim);
+}
 
 .preview-warn {
   flex-basis: 100%;
@@ -782,6 +791,12 @@ input[type="checkbox"]:indeterminate::after {
 }
 .hc-trash {
   color: var(--danger);
+}
+.hc-move {
+  color: var(--ok);
+}
+.hist-file.move {
+  color: var(--ok);
 }
 .hist-badge {
   font-size: 11px;

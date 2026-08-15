@@ -14,12 +14,37 @@ const {
   listChildren,
   crawlTree,
   applyPlan,
+  restoreStage,
+  STAGE_DIR,
 } = require('../src/fsops');
-const { planSync } = require('../src/sync');
+const { planSync, detectMoves, planDirs } = require('../src/sync');
 const { pruneDescendants } = require('../src/paths');
 
 async function tmpDir() {
   return fsp.mkdtemp(path.join(os.tmpdir(), 'syncglass-'));
+}
+
+// Мок Корзины: applyPlan отдаёт сюда служебную папку целиком, поэтому recursive.
+function mockTrash(collected) {
+  return async (abs) => {
+    collected.push(abs);
+    await fsp.rm(abs, { recursive: true, force: true });
+  };
+}
+
+async function treeOf(dir, rel = '', out = []) {
+  let dirents;
+  try {
+    dirents = await fsp.readdir(path.join(dir, rel), { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const d of dirents) {
+    const r = rel ? `${rel}/${d.name}` : d.name;
+    out.push(d.isDirectory() ? `${r}/` : r);
+    if (d.isDirectory()) await treeOf(dir, r, out);
+  }
+  return out.sort();
 }
 
 async function writeFile(root, rel, content) {
@@ -84,9 +109,7 @@ test('синхронизация вложенной ветки не трогае
       await scanFiles(path.join(dst, folder)),
     ];
     const plan = planSync(s, d);
-    await applyPlan(path.join(src, folder), path.join(dst, folder), plan, async (abs) =>
-      fsp.rm(abs)
-    );
+    await applyPlan(path.join(src, folder), path.join(dst, folder), plan, mockTrash([]));
   }
 
   // docs/2024 приведён к копии источника.
@@ -161,7 +184,7 @@ test('исключённая подпапка не копируется и не 
     await scanFiles(srcRoot, '', [], ex),
     await scanFiles(dstRoot, '', [], ex)
   );
-  await applyPlan(srcRoot, dstRoot, plan, async (abs) => fsp.rm(abs));
+  await applyPlan(srcRoot, dstRoot, plan, mockTrash([]));
 
   // Исключённая ветка не тронута с обеих сторон.
   assert.strictEqual(await fsp.readFile(path.join(dst, 'docs/2024/OLD.txt'), 'utf8'), 'dst-old');
@@ -199,10 +222,7 @@ test('applyPlan параллельно обрабатывает много фа�
 
   const plan = planSync(await scanFiles(src), await scanFiles(dst));
   const trashed = [];
-  const res = await applyPlan(src, dst, plan, async (abs) => {
-    trashed.push(abs);
-    await fsp.rm(abs);
-  });
+  const res = await applyPlan(src, dst, plan, mockTrash(trashed));
 
   assert.strictEqual(res.failures.length, 0);
   assert.strictEqual(res.done, res.total);
@@ -210,11 +230,13 @@ test('applyPlan параллельно обрабатывает много фа�
   for (let i = 0; i < 200; i += 1) {
     assert.strictEqual(await fsp.readFile(path.join(dst, `sub${i % 7}/f${i}.txt`), 'utf8'), `data-${i}`);
   }
-  // Все 50 лишних файлов удалены.
-  assert.strictEqual(trashed.length, 50);
+  // Все 50 лишних файлов удалены одной пачкой.
+  assert.strictEqual(trashed.length, 1);
+  assert.strictEqual(res.trashed, 50);
   for (let i = 0; i < 50; i += 1) {
     assert.strictEqual(fs.existsSync(path.join(dst, `old/x${i}.txt`)), false);
   }
+  assert.strictEqual(fs.existsSync(path.join(dst, STAGE_DIR)), false);
 });
 
 test('applyPlan копирует, перезаписывает и удаляет (в мок-корзину)', async () => {
@@ -231,12 +253,7 @@ test('applyPlan копирует, перезаписывает и удаляет
   const plan = planSync(await scanFiles(src), await scanFiles(dst));
 
   const trashed = [];
-  const trashFn = async (abs) => {
-    trashed.push(abs);
-    await fsp.rm(abs);
-  };
-
-  const res = await applyPlan(src, dst, plan, trashFn);
+  const res = await applyPlan(src, dst, plan, mockTrash(trashed));
 
   assert.strictEqual(res.total, 3); // copy a, overwrite b, trash c
   assert.strictEqual(await fsp.readFile(path.join(dst, 'a.txt'), 'utf8'), 'new file');
@@ -247,4 +264,186 @@ test('applyPlan копирует, перезаписывает и удаляет
   // Повторный проход не находит различий (mtime перенесён при копировании).
   const plan2 = planSync(await scanFiles(src), await scanFiles(dst));
   assert.strictEqual(plan2.copy.length + plan2.overwrite.length + plan2.trash.length, 0);
+});
+
+// ---- Перемещения ----
+
+test('перемещение файла в другую папку распознаётся и не копируется заново', async () => {
+  const src = await tmpDir();
+  const dst = await tmpDir();
+  await writeFile(src, 'A/big.bin', 'x'.repeat(4096));
+  await writeFile(src, 'A/stay.txt', 'stay');
+  await fsp.cp(src, dst, { recursive: true });
+  await fsp.mkdir(path.join(src, 'B'), { recursive: true });
+  await fsp.rename(path.join(src, 'A/big.bin'), path.join(src, 'B/big.bin'));
+
+  const plan = detectMoves(planSync(await scanFiles(src), await scanFiles(dst)));
+  assert.strictEqual(plan.moves.length, 1);
+  assert.strictEqual(plan.moves[0].from, 'A/big.bin');
+  assert.strictEqual(plan.moves[0].to, 'B/big.bin');
+  assert.strictEqual(plan.copy.length, 0);
+  assert.strictEqual(plan.trash.length, 0);
+
+  const trashed = [];
+  const res = await applyPlan(src, dst, plan, mockTrash(trashed));
+  assert.strictEqual(res.failures.length, 0);
+  assert.strictEqual(await fsp.readFile(path.join(dst, 'B/big.bin'), 'utf8'), 'x'.repeat(4096));
+  assert.strictEqual(fs.existsSync(path.join(dst, 'A/big.bin')), false);
+  assert.strictEqual(trashed.length, 0); // ничего не удалялось
+});
+
+test('переименование папки — это перемещения всех её файлов', async () => {
+  const src = await tmpDir();
+  const dst = await tmpDir();
+  for (let i = 0; i < 5; i += 1) await writeFile(src, `Старая/f${i}.txt`, `данные-${i}`);
+  await fsp.cp(src, dst, { recursive: true });
+  await fsp.rename(path.join(src, 'Старая'), path.join(src, 'Новая'));
+
+  const srcDirs = [];
+  const dstDirs = [];
+  const plan = detectMoves(
+    planSync(
+      await scanFiles(src, '', [], null, null, null, srcDirs),
+      await scanFiles(dst, '', [], null, null, null, dstDirs)
+    )
+  );
+  plan.dirs = planDirs(srcDirs, dstDirs);
+
+  assert.strictEqual(plan.moves.length, 5);
+  assert.strictEqual(plan.copy.length, 0);
+  assert.deepStrictEqual(plan.dirs.create, ['Новая']);
+  assert.deepStrictEqual(plan.dirs.remove, ['Старая']);
+
+  await applyPlan(src, dst, plan, mockTrash([]));
+  assert.deepStrictEqual(await treeOf(dst), await treeOf(src));
+});
+
+test('одинаковые размер, дата и имя в разных папках — перемещение не угадывается', async () => {
+  const same = { size: 10, mtimeMs: 5000 };
+  const plan = detectMoves(
+    planSync(
+      [{ path: 'c/doc.txt', ...same }, { path: 'd/doc.txt', ...same }],
+      [{ path: 'a/doc.txt', ...same }, { path: 'b/doc.txt', ...same }]
+    )
+  );
+  assert.strictEqual(plan.moves.length, 0);
+  assert.strictEqual(plan.copy.length, 2);
+  assert.strictEqual(plan.trash.length, 2);
+});
+
+test('переименованный при переносе файл ловится вторым проходом', async () => {
+  const plan = detectMoves(
+    planSync(
+      [{ path: 'Архив/отчёт-2024.pdf', size: 999, mtimeMs: 7000 }],
+      [{ path: 'Входящие/scan001.pdf', size: 999, mtimeMs: 7000 }]
+    )
+  );
+  assert.strictEqual(plan.moves.length, 1);
+  assert.strictEqual(plan.moves[0].from, 'Входящие/scan001.pdf');
+  assert.strictEqual(plan.moves[0].to, 'Архив/отчёт-2024.pdf');
+});
+
+test('пустые папки создаются и лишние убираются', async () => {
+  const src = await tmpDir();
+  const dst = await tmpDir();
+  await fsp.mkdir(path.join(src, 'ПустаяНовая'), { recursive: true });
+  await writeFile(src, 'Общая/a.txt', 'a');
+  await writeFile(dst, 'Общая/a.txt', 'a');
+  await fsp.mkdir(path.join(dst, 'Лишняя/Глубже'), { recursive: true });
+
+  const srcDirs = [];
+  const dstDirs = [];
+  const plan = planSync(
+    await scanFiles(src, '', [], null, null, null, srcDirs),
+    await scanFiles(dst, '', [], null, null, null, dstDirs)
+  );
+  plan.dirs = planDirs(srcDirs, dstDirs);
+  // Глубокие первыми, иначе rmdir родителя упрётся в непустую папку.
+  assert.deepStrictEqual(plan.dirs.remove, ['Лишняя/Глубже', 'Лишняя']);
+
+  await applyPlan(src, dst, plan, mockTrash([]));
+  assert.deepStrictEqual(await treeOf(dst), await treeOf(src));
+});
+
+test('rmdir не сносит папку, в которой осталось исключённое', async () => {
+  const src = await tmpDir();
+  const dst = await tmpDir();
+  await writeFile(dst, 'Лишняя/секрет.txt', 'не трогать');
+
+  const plan = planSync([], []);
+  plan.dirs = { create: [], remove: ['Лишняя'] };
+  await applyPlan(src, dst, plan, mockTrash([]));
+
+  assert.strictEqual(await fsp.readFile(path.join(dst, 'Лишняя/секрет.txt'), 'utf8'), 'не трогать');
+});
+
+// ---- Остановка и откат ----
+
+test('остановка откатывает копирование, перезапись, удаление и перемещение', async () => {
+  const src = await tmpDir();
+  const dst = await tmpDir();
+
+  await writeFile(src, 'move-me.bin', 'MOVED');
+  await writeFile(src, 'upd.txt', 'новое содержимое');
+  for (let i = 0; i < 40; i += 1) await writeFile(src, `new/n${i}.txt`, `new-${i}`);
+  await fsp.mkdir(path.join(src, 'НоваяПустая'), { recursive: true });
+
+  await writeFile(dst, 'old/move-me.bin', 'MOVED');
+  await writeFile(dst, 'upd.txt', 'старое');
+  for (let i = 0; i < 40; i += 1) await writeFile(dst, `stale/s${i}.txt`, `stale-${i}`);
+
+  // Дата у перемещаемого файла должна совпасть, иначе пара не найдётся.
+  const st = await fsp.stat(path.join(src, 'move-me.bin'));
+  await fsp.utimes(path.join(dst, 'old/move-me.bin'), st.atime, st.mtime);
+
+  const before = await treeOf(dst);
+  const updBefore = await fsp.readFile(path.join(dst, 'upd.txt'), 'utf8');
+
+  const srcDirs = [];
+  const dstDirs = [];
+  const plan = detectMoves(
+    planSync(
+      await scanFiles(src, '', [], null, null, null, srcDirs),
+      await scanFiles(dst, '', [], null, null, null, dstDirs)
+    )
+  );
+  plan.dirs = planDirs(srcDirs, dstDirs);
+  assert.strictEqual(plan.moves.length, 1);
+
+  // Останавливаем на середине работы.
+  let seen = 0;
+  const res = await applyPlan(src, dst, plan, mockTrash([]), () => {
+    seen += 1;
+  }, { shouldStop: () => seen >= 20 });
+
+  assert.strictEqual(res.cancelled, true);
+  assert.deepStrictEqual(await treeOf(dst), before);
+  assert.strictEqual(await fsp.readFile(path.join(dst, 'upd.txt'), 'utf8'), updBefore);
+  assert.strictEqual(await fsp.readFile(path.join(dst, 'old/move-me.bin'), 'utf8'), 'MOVED');
+  assert.strictEqual(fs.existsSync(path.join(dst, STAGE_DIR)), false);
+});
+
+test('оборванный запуск: restoreStage возвращает оригиналы из служебной папки', async () => {
+  const dst = await tmpDir();
+  await writeFile(dst, `${STAGE_DIR}/docs/важное.txt`, 'оригинал');
+  await writeFile(dst, `${STAGE_DIR}/корень.txt`, 'тоже оригинал');
+
+  const restored = await restoreStage(dst);
+  assert.strictEqual(restored, 2);
+  assert.strictEqual(await fsp.readFile(path.join(dst, 'docs/важное.txt'), 'utf8'), 'оригинал');
+  assert.strictEqual(await fsp.readFile(path.join(dst, 'корень.txt'), 'utf8'), 'тоже оригинал');
+  assert.strictEqual(fs.existsSync(path.join(dst, STAGE_DIR)), false);
+});
+
+test('служебная папка не видна обходам и не попадает в план', async () => {
+  const dir = await tmpDir();
+  await writeFile(dir, 'обычный.txt', '1');
+  await writeFile(dir, `${STAGE_DIR}/спрятанный.txt`, '2');
+
+  const dirs = [];
+  const files = await scanFiles(dir, '', [], null, null, null, dirs);
+  assert.deepStrictEqual(files.map((f) => f.path), ['обычный.txt']);
+  assert.deepStrictEqual(dirs, []);
+  assert.deepStrictEqual((await listChildren(dir)).map((c) => c.name), ['обычный.txt']);
+  assert.deepStrictEqual(await listTopFolderNames(dir), []);
 });

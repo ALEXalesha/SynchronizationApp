@@ -70,3 +70,47 @@ test('summarize считает итоги и total', () => {
 test('isChanged: одинаковый размер и время → false', () => {
   assert.strictEqual(isChanged(f('a', 10, 1000), f('a', 10, 1000)), false);
 });
+
+const { detectMoves, planDirs } = require('../src/sync');
+
+test('перемещение находится, даже если приёмник округлил дату (сеть, FAT)', () => {
+  // На шаре дата после копирования отличается на доли секунды. Раньше это ломало
+  // сопоставление, и перенос выглядел как удалить + скопировать заново.
+  const plan = detectMoves(
+    planSync(
+      [f('Архив/скан.pdf', 100500, 1700000000000)],
+      [f('Входящие/скан.pdf', 100500, 1700000001300)]
+    )
+  );
+  assert.strictEqual(plan.moves.length, 1);
+  assert.strictEqual(plan.moves[0].from, 'Входящие/скан.pdf');
+  assert.strictEqual(plan.moves[0].to, 'Архив/скан.pdf');
+});
+
+test('одинаковое имя и размер, но дата разошлась сильно — это разные файлы', () => {
+  const plan = detectMoves(
+    planSync(
+      [f('Новая/док.txt', 50, 1700000000000)],
+      [f('Старая/док.txt', 50, 1600000000000)]
+    )
+  );
+  assert.strictEqual(plan.moves.length, 0);
+  assert.strictEqual(plan.copy.length, 1);
+  assert.strictEqual(plan.trash.length, 1);
+});
+
+test('planDirs удаляет от глубоких к мелким, создаёт от мелких к глубоким', () => {
+  const dirs = planDirs(['a', 'a/b', 'a/b/c'], ['x', 'x/y']);
+  assert.deepStrictEqual(dirs.create, ['a', 'a/b', 'a/b/c']);
+  assert.deepStrictEqual(dirs.remove, ['x/y', 'x']);
+});
+
+test('summarize учитывает перемещения и папки в total', () => {
+  const plan = detectMoves(planSync([f('n/a.txt', 1, 1)], [f('o/a.txt', 1, 1)]));
+  plan.dirs = { create: ['n'], remove: ['o'] };
+  const s = summarize(plan);
+  assert.strictEqual(s.move, 1);
+  assert.strictEqual(s.copy, 0);
+  assert.strictEqual(s.dirs, 2);
+  assert.strictEqual(s.total, 3);
+});

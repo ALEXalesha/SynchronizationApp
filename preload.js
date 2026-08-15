@@ -19,6 +19,7 @@ contextBridge.exposeInMainWorld('api', {
     return () => ipcRenderer.removeListener('preview-progress', listener);
   },
   sync: (args) => ipcRenderer.invoke('sync', args),
+  cancelSync: () => ipcRenderer.invoke('cancel-sync'),
   onSyncProgress: (callback) => {
     const listener = (_event, data) => callback(data);
     ipcRenderer.on('sync-progress', listener);
