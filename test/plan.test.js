@@ -194,3 +194,40 @@ test('countByFolder раскладывает работу по веткам и �
   assert.strictEqual(sum('trash'), plan.trash.length);
   assert.strictEqual(sum('dirs'), plan.dirs.create.length + plan.dirs.remove.length);
 });
+
+test('родительская папка ветки не удаляется, если на источнике она есть', async () => {
+  const src = await tmpDir();
+  const dst = await tmpDir();
+  // 'Документы' есть на обеих сторонах, а вот 'Документы/2024' — только на приёмнике.
+  await fsp.mkdir(path.join(src, 'Документы'), { recursive: true });
+  await writeFile(dst, 'Документы/2024/старое.txt', 'выкинуть');
+
+  const plan = await buildRunPlan(src, dst, ['Документы/2024'], [], liveScan);
+
+  assert.ok(
+    plan.dirs.remove.includes('Документы/2024'),
+    'саму лишнюю ветку убрать надо'
+  );
+  assert.ok(
+    !plan.dirs.remove.includes('Документы'),
+    'а её родителя — нет: на источнике эта папка живая'
+  );
+
+  await applyPlan(src, dst, plan, async (abs) => fsp.rm(abs, { recursive: true, force: true }));
+  assert.strictEqual(fs.existsSync(path.join(dst, 'Документы')), true);
+  assert.strictEqual(fs.existsSync(path.join(dst, 'Документы', '2024')), false);
+});
+
+test('родительская папка создаётся, когда её нет на приёмнике', async () => {
+  const src = await tmpDir();
+  const dst = await tmpDir();
+  await writeFile(src, 'Документы/2024/новое.txt', 'копировать');
+
+  const plan = await buildRunPlan(src, dst, ['Документы/2024'], [], liveScan);
+  await applyPlan(src, dst, plan, async (abs) => fsp.rm(abs, { recursive: true, force: true }));
+
+  assert.strictEqual(
+    await fsp.readFile(path.join(dst, 'Документы', '2024', 'новое.txt'), 'utf8'),
+    'копировать'
+  );
+});

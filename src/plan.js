@@ -39,6 +39,12 @@ function ancestorsOf(branch) {
   return out;
 }
 
+// Из списка относительных путей оставляет те, что на стороне root — папки.
+async function existingDirs(root, rels) {
+  const types = await Promise.all(rels.map((rel) => statType(root, rel)));
+  return rels.filter((_, i) => types[i] === 'dir');
+}
+
 // План для одной выбранной ветки (папки ИЛИ отдельного файла).
 // Все пути в результате — от корня стороны, а не от ветки: только так виден
 // перенос файла из одной выбранной ветки в другую.
@@ -67,15 +73,31 @@ async function planForBranch(srcRoot, dstRoot, branch, excludes, scan) {
   ]);
   const under = (rel) => (branch ? `${branch}/${rel}` : rel);
   const rebase = (entries) => entries.map((e) => ({ ...e, path: under(e.path) }));
-  // Сама ветка и её родители — тоже часть структуры: без них пустая выбранная
-  // папка не создастся, а лишняя не уберётся.
-  const selfAndParents = branch ? [...ancestorsOf(branch), branch] : [];
+
+  // Сама ветка — часть структуры: без неё пустая выбранная папка не создастся,
+  // а лишняя не уберётся. Родителей же проверяем на каждой стороне отдельно:
+  // ветки может не быть на источнике, а её родитель там есть, и тогда удалять
+  // его на приёмнике нельзя — иначе с приёмника пропала бы живая папка.
+  const parents = branch ? ancestorsOf(branch) : [];
+  const self = branch ? [branch] : [];
+  const [srcParents, dstParents] = await Promise.all([
+    existingDirs(srcRoot, parents),
+    existingDirs(dstRoot, parents),
+  ]);
 
   return {
     plan: planSync(rebase(src.files), rebase(dst.files)),
-    srcDirs: srcType === 'dir' ? [...selfAndParents, ...src.dirs.map(under)] : [],
-    dstDirs: dstType === 'dir' ? [...selfAndParents, ...dst.dirs.map(under)] : [],
+    srcDirs: [...srcParents, ...(srcType === 'dir' ? [...self, ...src.dirs.map(under)] : [])],
+    dstDirs: [...dstParents, ...(dstType === 'dir' ? [...self, ...dst.dirs.map(under)] : [])],
   };
+}
+
+// Дописывает items в конец target. Именно циклом, а не push(...items):
+// спред раскладывает массив в аргументы вызова, а их число ограничено
+// (около 125 тысяч), и на ветке в сотни тысяч файлов слияние планов падало
+// с «Maximum call stack size exceeded» ещё до предпросмотра.
+function appendAll(target, items) {
+  for (const item of items) target.push(item);
 }
 
 // Один план на весь запуск: ветки объединяются, и только потом ищутся перемещения.
@@ -87,9 +109,9 @@ async function buildRunPlan(srcRoot, dstRoot, folders, excludes, scan) {
 
   for (const folder of folders) {
     const branch = await planForBranch(srcRoot, dstRoot, folder, excludes, scan);
-    for (const key of Object.keys(merged)) merged[key].push(...branch.plan[key]);
-    srcDirs.push(...branch.srcDirs);
-    dstDirs.push(...branch.dstDirs);
+    for (const key of Object.keys(merged)) appendAll(merged[key], branch.plan[key]);
+    appendAll(srcDirs, branch.srcDirs);
+    appendAll(dstDirs, branch.dstDirs);
   }
 
   const plan = detectMoves(merged);

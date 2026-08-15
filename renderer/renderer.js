@@ -732,7 +732,13 @@ async function runSync() {
     });
     el.progressBar.classList.remove('indeterminate');
 
-    if (res && res.cancelled) {
+    if (res && res.error) {
+      // Главный процесс отказался начинать (например, сторона недоступна).
+      // Важно сказать прямо, что приёмник не тронут: иначе видно только ошибку.
+      el.progressFill.style.width = '0%';
+      el.progressText.textContent = 'Не начато';
+      el.previewSummary.innerHTML = `<div class="preview-warn">⚠ Синхронизация не начиналась: ${escapeHtml(res.error)}.<br>Ничего не изменено. Проверьте связь и повторите.</div>`;
+    } else if (res && res.cancelled) {
       el.progressFill.style.width = '0%';
       el.progressText.textContent = 'Остановлено, всё возвращено как было';
       const lost = res.unrecoverable

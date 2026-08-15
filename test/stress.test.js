@@ -203,3 +203,28 @@ test('файл нельзя отложить — удаление идёт на�
   assert.deepStrictEqual(trashed, ['лишний.txt']);
   assert.strictEqual(fs.existsSync(path.join(dst, 'лишний.txt')), false);
 });
+
+// Ветка с сотнями тысяч файлов. Слияние планов по веткам не должно упираться
+// в предел числа аргументов вызова: push(...arr) ломается примерно на 125k.
+test('масштаб: ветка на 200k файлов сливается в общий план', async () => {
+  const src = await tmpDir();
+  const dst = await tmpDir();
+  await fsp.mkdir(path.join(src, 'big'));
+  await fsp.mkdir(path.join(dst, 'big'));
+
+  const N = 200000;
+  const files = [];
+  const dirs = [];
+  for (let i = 0; i < N; i += 1) {
+    files.push({ path: `f${i}.bin`, size: 10, mtimeMs: 1000 });
+    dirs.push(`d${i}`);
+  }
+  const hugeScan = async () => ({ files, dirs });
+
+  const plan = await buildRunPlan(src, dst, ['big'], [], hugeScan);
+  assert.strictEqual(plan.unchanged.length, N);
+  assert.strictEqual(plan.copy.length, 0);
+  assert.strictEqual(plan.trash.length, 0);
+  assert.strictEqual(plan.dirs.create.length, 0);
+  assert.strictEqual(plan.dirs.remove.length, 0);
+});

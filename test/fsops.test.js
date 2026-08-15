@@ -447,3 +447,93 @@ test('служебная папка не видна обходам и не по�
   assert.deepStrictEqual((await listChildren(dir)).map((c) => c.name), ['обычный.txt']);
   assert.deepStrictEqual(await listTopFolderNames(dir), []);
 });
+
+// ---- Источник исчезает между планом и применением ----
+// Между сканированием и работой проходит время (предпросмотр, кеш сканов),
+// и файл на источнике за это время могут удалить. Оригинал на приёмнике при
+// этом уже отложен в служебную папку, то есть существует в одном экземпляре.
+
+test('источник исчез перед перезаписью — оригинал на приёмнике остаётся', async () => {
+  const src = await tmpDir();
+  const dst = await tmpDir();
+  await fsp.writeFile(path.join(src, 'отчёт.txt'), 'новое');
+  await fsp.writeFile(path.join(dst, 'отчёт.txt'), 'старое');
+
+  const entry = { path: 'отчёт.txt', size: 5, mtimeMs: Date.now() };
+  const plan = { copy: [], overwrite: [entry], trash: [], unchanged: [] };
+
+  // Файл пропадает уже после того, как план построен.
+  await fsp.rm(path.join(src, 'отчёт.txt'));
+
+  const trashed = [];
+  const res = await applyPlan(src, dst, plan, mockTrash(trashed));
+
+  assert.strictEqual(
+    await fsp.readFile(path.join(dst, 'отчёт.txt'), 'utf8'),
+    'старое',
+    'оригинал должен вернуться на место, а не уехать в Корзину'
+  );
+  assert.deepStrictEqual(res.failures, [{ action: 'overwrite', path: 'отчёт.txt', code: 'ENOENT' }]);
+  assert.strictEqual(fs.existsSync(path.join(dst, STAGE_DIR)), false);
+});
+
+test('источник исчез перед копированием — это ошибка, а не тихий пропуск', async () => {
+  const src = await tmpDir();
+  const dst = await tmpDir();
+
+  const entry = { path: 'новый.txt', size: 3, mtimeMs: Date.now() };
+  const plan = { copy: [entry], overwrite: [], trash: [], unchanged: [] };
+
+  const res = await applyPlan(src, dst, plan, mockTrash([]));
+
+  assert.strictEqual(fs.existsSync(path.join(dst, 'новый.txt')), false);
+  assert.deepStrictEqual(res.failures, [{ action: 'copy', path: 'новый.txt', code: 'ENOENT' }]);
+});
+
+test('источник исчез при запасном пути перемещения — оригинал не пропадает', async () => {
+  const src = await tmpDir();
+  const dst = await tmpDir();
+  await fsp.writeFile(path.join(dst, 'было.txt'), 'данные');
+  // Путь назначения занимаем папкой: rename на неё не пройдёт, пойдёт запасной путь.
+  await fsp.mkdir(path.join(dst, 'стало.txt'));
+  await fsp.writeFile(path.join(dst, 'стало.txt', 'внутри.txt'), 'чужое');
+
+  const plan = {
+    copy: [],
+    overwrite: [],
+    trash: [],
+    unchanged: [],
+    moves: [{ from: 'было.txt', to: 'стало.txt', path: 'стало.txt', size: 6 }],
+  };
+
+  const res = await applyPlan(src, dst, plan, mockTrash([]));
+
+  assert.strictEqual(
+    await fsp.readFile(path.join(dst, 'было.txt'), 'utf8'),
+    'данные',
+    'нечем заменить — значит оригинал остаётся там, где был'
+  );
+  assert.strictEqual(res.failures.length, 1);
+  assert.strictEqual(res.failures[0].code, 'ENOENT');
+});
+
+test('restoreStage не уничтожает оригиналы, которые не смог вернуть', async () => {
+  const dst = await tmpDir();
+  const stage = path.join(dst, STAGE_DIR);
+  await fsp.mkdir(stage, { recursive: true });
+  await fsp.writeFile(path.join(stage, 'вернётся.txt'), 'первый');
+  await fsp.writeFile(path.join(stage, 'застрял.txt'), 'второй');
+  // Место возврата занято непустой папкой — rename туда не пройдёт.
+  await fsp.mkdir(path.join(dst, 'застрял.txt'));
+  await fsp.writeFile(path.join(dst, 'застрял.txt', 'помеха.txt'), 'мешает');
+
+  const restored = await restoreStage(dst);
+
+  assert.strictEqual(restored, 1);
+  assert.strictEqual(await fsp.readFile(path.join(dst, 'вернётся.txt'), 'utf8'), 'первый');
+  assert.strictEqual(
+    await fsp.readFile(path.join(stage, 'застрял.txt'), 'utf8'),
+    'второй',
+    'служебную папку нельзя сносить, пока внутри лежат чьи-то данные'
+  );
+});

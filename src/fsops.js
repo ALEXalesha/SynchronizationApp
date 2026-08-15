@@ -250,6 +250,24 @@ async function runPool(items, concurrency, worker) {
   await Promise.all(runners);
 }
 
+// Убирает служебную папку, но только если внутри не осталось файлов.
+// Если что-то осталось (оригинал, который не удалось ни заменить, ни вернуть),
+// папка уцелеет: содержимое разберёт restoreStage на следующем запуске.
+// Стереть её вслепую значило бы уничтожить единственную копию файла молча.
+async function removeStageIfEmpty(stageRoot) {
+  let left;
+  try {
+    left = await scanFiles(stageRoot);
+  } catch {
+    // Заглянуть внутрь не вышло: имя занято файлом, нет прав, сеть отвалилась.
+    // Раз содержимое неизвестно — тем более не трогаем.
+    return false;
+  }
+  if (left.length > 0) return false;
+  await fsp.rm(stageRoot, { recursive: true, force: true }).catch(() => {});
+  return true;
+}
+
 // Возвращает содержимое служебной папки приёмника обратно на свои места.
 // Нужна на старте синхронизации: если прошлый запуск оборвался (вылет, отключение
 // питания), в папке лежат оригиналы, которые он не успел ни вернуть, ни выбросить.
@@ -269,10 +287,11 @@ async function restoreStage(dstRoot) {
       await fsp.rename(path.join(stageRoot, entry.path), back);
       restored += 1;
     } catch {
-      // файл занят или уже на месте — оставляем в служебной папке
+      // файл занят или путь занят папкой — оставляем в служебной папке
+      // до следующего запуска, когда помеха может исчезнуть.
     }
   });
-  await fsp.rm(stageRoot, { recursive: true, force: true }).catch(() => {});
+  await removeStageIfEmpty(stageRoot);
   return restored;
 }
 
@@ -360,10 +379,15 @@ async function applyPlan(srcRoot, dstRoot, plan, trashFn, onProgress = () => {},
       // Переименовать не вышло (файл занят, разные тома) — работаем как раньше:
       // копируем по новому пути, оригинал убираем в служебную папку.
       try {
-        await copyFile(srcRoot, dstRoot, mv.to);
-        journal.copy.push(mv.to);
-        await stash(mv.from);
-        journal.stage.push(mv.from);
+        if (await copyFile(srcRoot, dstRoot, mv.to)) {
+          journal.copy.push(mv.to);
+          await stash(mv.from);
+          journal.stage.push(mv.from);
+        } else {
+          // Источник исчез после сканирования. Оригинал не трогаем: убери мы его,
+          // файл пропал бы с обеих сторон, а копировать уже нечего.
+          fail('move', mv.to, { code: 'ENOENT' });
+        }
       } catch (err) {
         fail('move', mv.to, err);
       }
@@ -373,8 +397,10 @@ async function applyPlan(srcRoot, dstRoot, plan, trashFn, onProgress = () => {},
 
   const doCopy = async (entry) => {
     try {
-      await copyFile(srcRoot, dstRoot, entry.path);
-      journal.copy.push(entry.path);
+      // false — источник исчез после сканирования. Копировать нечего, и записывать
+      // в журнал тоже нечего: иначе история отчиталась бы о несуществующей копии.
+      if (await copyFile(srcRoot, dstRoot, entry.path)) journal.copy.push(entry.path);
+      else fail('copy', entry.path, { code: 'ENOENT' });
     } catch (err) {
       fail('copy', entry.path, err);
     }
@@ -396,8 +422,15 @@ async function applyPlan(srcRoot, dstRoot, plan, trashFn, onProgress = () => {},
       unrecoverable += 1;
     }
     try {
-      await copyFile(srcRoot, dstRoot, entry.path);
-      if (parked) journal.overwrite.push(entry.path);
+      if (await copyFile(srcRoot, dstRoot, entry.path)) {
+        if (parked) journal.overwrite.push(entry.path);
+      } else {
+        // Источник исчез после сканирования. Заменять нечем, поэтому возвращаем
+        // отложенный оригинал: без этого он уехал бы в Корзину вместе с мусором,
+        // а на его месте не оказалось бы ничего.
+        if (parked) await unstash(entry.path).catch(() => {});
+        fail('overwrite', entry.path, { code: 'ENOENT' });
+      }
     } catch (err) {
       // Оригинал уже убран, а новый не лёг — возвращаем старый, чтобы файл не пропал.
       if (parked) await unstash(entry.path).catch(() => {});
@@ -475,14 +508,16 @@ async function applyPlan(srcRoot, dstRoot, plan, trashFn, onProgress = () => {},
       await trashFn(stageRoot);
       trashed = journal.stage.length + journal.overwrite.length;
       // Убираем каркас папок, если trashFn забрал только содержимое.
-      await fsp.rm(stageRoot, { recursive: true, force: true }).catch(() => {});
+      await removeStageIfEmpty(stageRoot);
     } catch (err) {
       // Выбросить не удалось — служебную папку оставляем как есть.
       // Стереть её здесь значило бы уничтожить оригиналы молча.
       fail('trash', STAGE_DIR, err);
     }
   } else {
-    await fsp.rm(stageRoot, { recursive: true, force: true }).catch(() => {});
+    // Выбрасывать нечего, но внутри мог остаться отложенный оригинал, который
+    // не удалось ни заменить, ни вернуть. Такую папку не трогаем.
+    await removeStageIfEmpty(stageRoot);
   }
 
   return { done, total, failures, cancelled: false, trashed, unrecoverable };
@@ -519,7 +554,9 @@ async function rollback(dstRoot, stageRoot, journal) {
     await fsp.rmdir(abs(rel)).catch(() => {});
   }
 
-  await fsp.rm(stageRoot, { recursive: true, force: true }).catch(() => {});
+  // Всё, что удалось вернуть, уже на местах. Если внутри что-то осталось,
+  // папку не трогаем — разберём на следующем запуске.
+  await removeStageIfEmpty(stageRoot);
 }
 
 module.exports = {
