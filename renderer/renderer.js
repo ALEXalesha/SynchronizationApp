@@ -732,12 +732,16 @@ async function runSync() {
     });
     el.progressBar.classList.remove('indeterminate');
 
-    if (res && res.error) {
+    if (res && res.error && !res.started) {
       // Главный процесс отказался начинать (например, сторона недоступна).
       // Важно сказать прямо, что приёмник не тронут: иначе видно только ошибку.
       el.progressFill.style.width = '0%';
       el.progressText.textContent = 'Не начато';
       el.previewSummary.innerHTML = `<div class="preview-warn">⚠ Синхронизация не начиналась: ${escapeHtml(res.error)}.<br>Ничего не изменено. Проверьте связь и повторите.</div>`;
+    } else if (res && res.error) {
+      // Оборвалось уже на записи. Обещать «ничего не изменено» тут нельзя.
+      el.progressText.textContent = 'Прервано ошибкой';
+      el.previewSummary.innerHTML = `<div class="preview-warn">⚠ Синхронизация оборвалась: ${escapeHtml(res.error)}.<br>Часть файлов могла быть обработана. Проверьте связь и запустите ещё раз — незавершённое будет разобрано на старте.</div>`;
     } else if (res && res.cancelled) {
       el.progressFill.style.width = '0%';
       el.progressText.textContent = 'Остановлено, всё возвращено как было';
@@ -760,8 +764,13 @@ async function runSync() {
     el.confirmBtn.disabled = false;
     confirmMode = 'close';
   } catch (err) {
+    // Без этого кнопка «Выполнить» осталась бы заблокированной, и окно
+    // закрывалось бы только «Отменой», без обновления списка.
     el.progressText.textContent = `Ошибка: ${err.message}`;
     el.progressBar.classList.remove('indeterminate');
+    el.confirmBtn.textContent = 'Закрыть';
+    el.confirmBtn.disabled = false;
+    confirmMode = 'close';
   } finally {
     syncRunning = false;
     el.cancelBtn.textContent = 'Отмена';
@@ -922,7 +931,9 @@ async function probeTick() {
 
     if (changed) {
       // Связь появилась/пропала — обновляем список и пересчитываем размеры.
-      await refresh({ force: false });
+      // force сбрасывает кеш сканов: пока сторона была недоступна, её папки
+      // читались как пустые, и такой скан нельзя пускать в план.
+      await refresh({ force: true });
     } else if (r.localOk || r.networkOk) {
       // Стабильно — дёшево держим список верхнего уровня актуальным.
       await lightRelistTop();

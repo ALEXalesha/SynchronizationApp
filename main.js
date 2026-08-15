@@ -9,6 +9,7 @@ const crypto = require('crypto');
 const { summarize } = require('./src/sync');
 const { scanFiles, listChildren, crawlTree, applyPlan, restoreStage } = require('./src/fsops');
 const { buildRunPlan, countByFolder } = require('./src/plan');
+const { rootsOverlap } = require('./src/paths');
 
 let mainWindow;
 
@@ -16,6 +17,12 @@ let mainWindow;
 // Один скан на ветку переиспользуется предпросмотром и синхронизацией,
 // чтобы не гонять по сети одни и те же stat-запросы повторно.
 const scanCache = new Map();
+
+// Скан живёт ограниченное время. Связка «предпросмотр → выполнить» укладывается
+// в минуты, а вот окно, открытое с утра, к вечеру описывает диск, которого уже нет:
+// по такому скану план получится из устаревших данных, и разница между сторонами
+// будет посчитана неверно.
+const SCAN_TTL_MS = 15 * 60 * 1000;
 
 function cacheKey(absFolderPath, excludes) {
   if (!excludes || excludes.size === 0) return absFolderPath;
@@ -25,10 +32,11 @@ function cacheKey(absFolderPath, excludes) {
 // Возвращает { files, dirs } — оба списка относительно absFolderPath.
 async function getScan(absFolderPath, excludes = null, onFile = null) {
   const key = cacheKey(absFolderPath, excludes);
-  if (scanCache.has(key)) return scanCache.get(key);
+  const hit = scanCache.get(key);
+  if (hit && Date.now() - hit.at < SCAN_TTL_MS) return hit;
   const dirs = [];
   const files = await scanFiles(absFolderPath, '', [], excludes, onFile, null, dirs);
-  const scan = { files, dirs };
+  const scan = { files, dirs, at: Date.now() };
   scanCache.set(key, scan);
   return scan;
 }
@@ -66,6 +74,9 @@ async function assertRootsReachable(srcRoot, dstRoot) {
   const [srcOk, dstOk] = await Promise.all([isDir(srcRoot), isDir(dstRoot)]);
   if (!srcOk) throw new Error(`папка-источник недоступна (${srcRoot || 'не выбрана'})`);
   if (!dstOk) throw new Error(`папка-приёмник недоступна (${dstRoot || 'не выбрана'})`);
+  if (rootsOverlap(srcRoot, dstRoot)) {
+    throw new Error('папки вложены друг в друга — выберите непересекающиеся');
+  }
 }
 
 
@@ -460,7 +471,12 @@ ipcMain.handle('start-crawl', async (event, { localPath, networkPath, noLimit = 
     if (token !== crawlToken) return { ok: false, aborted: true };
     await saveSizeCache(localPath, networkPath, [...index.values()]);
     if (activeCrawl && activeCrawl.index === index) activeCrawl = null;
-    crawlData.complete = trusted; // только полный обход годится вместо скана
+    // Синхронизация, прошедшая за время обхода, обнуляет crawlData: приёмник
+    // изменился, и собранный индекс описывает уже не то дерево. Тогда отмечать
+    // нечего — план пересканирует стороны заново.
+    if (crawlData && crawlData.local === fileLocal) {
+      crawlData.complete = trusted; // только полный обход годится вместо скана
+    }
     post('crawl-done', { scanned, ok: true, partial: !trusted });
     return { ok: true, scanned, partial: !trusted };
   } catch (err) {
@@ -597,7 +613,18 @@ ipcMain.handle('sync', async (event, { localPath, networkPath, folders, excludes
     crawlData = null; // приёмник изменился — прежний индекс уже неверен
   }
 
-  const plan = await buildRunPlan(srcRoot, dstRoot, folders, excludes, makeScanner());
+  // Скан может оборваться на полпути (сеть отвалилась после проверки корней).
+  // Тогда план строить не на чем — выходим до того, как хоть что-то тронули.
+  let plan;
+  try {
+    plan = await buildRunPlan(srcRoot, dstRoot, folders, excludes, makeScanner());
+  } catch (err) {
+    // Сорвался обычно обрыв связи. Что успели прочитать до него — уже под вопросом,
+    // поэтому кеши сбрасываем: следующая попытка пойдёт за свежими данными.
+    scanCache.clear();
+    crawlData = null;
+    return { error: `не удалось прочитать папки (${err.message})` };
+  }
   const totals = summarize(plan);
 
   // Прогресс шлём не чаще ~10 раз в секунду: при параллельной обработке 500k
@@ -616,21 +643,31 @@ ipcMain.handle('sync', async (event, { localPath, networkPath, folders, excludes
     }
   };
 
-  const res = await applyPlan(
-    srcRoot,
-    dstRoot,
-    plan,
-    trashFn,
-    ({ done, total, action, path: relPath }) => {
-      if (doneBy[action] !== undefined) doneBy[action] += 1;
-      const now = Date.now();
-      if (now - lastSent >= 100 || done === total) {
-        lastSent = now;
-        notify({ done, total, action, path: relPath, by: { ...doneBy } });
-      }
-    },
-    { shouldStop: () => syncStopped }
-  );
+  // Дальше уже идут записи на приёмник. Сорваться applyPlan может только на чём-то
+  // непредвиденном (ошибки по отдельным файлам она копит сама), но если это случилось,
+  // отвечать надо всё равно: без ответа окно так и висит на «Начинаю…».
+  let res;
+  try {
+    res = await applyPlan(
+      srcRoot,
+      dstRoot,
+      plan,
+      trashFn,
+      ({ done, total, action, path: relPath }) => {
+        if (doneBy[action] !== undefined) doneBy[action] += 1;
+        const now = Date.now();
+        if (now - lastSent >= 100 || done === total) {
+          lastSent = now;
+          notify({ done, total, action, path: relPath, by: { ...doneBy } });
+        }
+      },
+      { shouldStop: () => syncStopped }
+    );
+  } catch (err) {
+    scanCache.clear();
+    crawlData = null;
+    return { error: err.message, started: true };
+  }
 
   // Приёмник изменился — кеши устарели, сбрасываем перед следующим обновлением.
   scanCache.clear();

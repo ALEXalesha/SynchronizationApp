@@ -1,5 +1,22 @@
 'use strict';
 
+const path = require('path');
+
+// Лежит ли inner внутри outer (или это тот же путь).
+// Регистр не важен: на Windows пути к нему нечувствительны.
+function isInside(inner, outer) {
+  const a = path.resolve(inner).toLowerCase();
+  const b = path.resolve(outer).toLowerCase();
+  return a === b || a.startsWith(b.endsWith(path.sep) ? b : b + path.sep);
+}
+
+// Пересекаются ли корни синхронизации: один внутри другого или это одна папка.
+// Такая пара — копирование папки внутрь самой себя: приёмник по ходу работы
+// растёт, и уже скопированное снова выглядит новым.
+function rootsOverlap(srcRoot, dstRoot) {
+  return isInside(srcRoot, dstRoot) || isInside(dstRoot, srcRoot);
+}
+
 // Из набора выбранных путей папок убирает те, что вложены в другой выбранный путь.
 // Если выбраны и 'docs', и 'docs/2024' — синхронизация 'docs' уже покрывает вложенное,
 // поэтому оставляем только 'docs'. Пути с разделителем '/'.
@@ -13,4 +30,4 @@ function pruneDescendants(paths) {
   return result;
 }
 
-module.exports = { pruneDescendants };
+module.exports = { pruneDescendants, isInside, rootsOverlap };
