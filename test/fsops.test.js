@@ -331,16 +331,32 @@ test('одинаковые размер, дата и имя в разных па
   assert.strictEqual(plan.trash.length, 2);
 });
 
-test('переименованный при переносе файл ловится вторым проходом', async () => {
+test('разные имена не признаются переносом, даже при совпадении размера и даты', async () => {
+  // Раньше такая пара считалась переносом с переименованием. Но размер и дата
+  // до миллисекунды совпадают и у совершенно разных файлов (распаковка архива,
+  // git checkout, robocopy ставят метки пачкой), и приёмник получал чужое
+  // содержимое молча. Копируем — медленнее, зато верно.
   const plan = detectMoves(
     planSync(
       [{ path: 'Архив/отчёт-2024.pdf', size: 999, mtimeMs: 7000 }],
       [{ path: 'Входящие/scan001.pdf', size: 999, mtimeMs: 7000 }]
     )
   );
+  assert.strictEqual(plan.moves.length, 0);
+  assert.strictEqual(plan.copy.length, 1);
+  assert.strictEqual(plan.trash.length, 1);
+});
+
+test('перенос с сохранением имени по-прежнему ловится', async () => {
+  const plan = detectMoves(
+    planSync(
+      [{ path: 'Архив/2024/отчёт.pdf', size: 999, mtimeMs: 7000 }],
+      [{ path: 'Входящие/отчёт.pdf', size: 999, mtimeMs: 7000 }]
+    )
+  );
   assert.strictEqual(plan.moves.length, 1);
-  assert.strictEqual(plan.moves[0].from, 'Входящие/scan001.pdf');
-  assert.strictEqual(plan.moves[0].to, 'Архив/отчёт-2024.pdf');
+  assert.strictEqual(plan.moves[0].from, 'Входящие/отчёт.pdf');
+  assert.strictEqual(plan.moves[0].to, 'Архив/2024/отчёт.pdf');
 });
 
 test('пустые папки создаются и лишние убираются', async () => {

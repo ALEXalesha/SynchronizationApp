@@ -88,8 +88,13 @@ function isUnderExcluded(rel, excludes) {
 }
 
 // Возвращает индексы стороны root из завершённого обхода, или null.
+// Срок жизни у индекса тот же, что у сканов, и по той же причине: он подменяет
+// собой живой скан, а значит к вечеру описывает диск, которого уже нет. Разница
+// лишь в том, что обход переживает и «Обновить», и выключение подсчёта размеров,
+// поэтому без срока он оставался бы единственным непроверяемым источником данных.
 function crawlSideFor(root) {
   if (!crawlData || !crawlData.complete) return null;
+  if (Date.now() - crawlData.at > SCAN_TTL_MS) return null;
   if (root && root === crawlData.localPath) return { files: crawlData.local, dirs: crawlData.localDirs };
   if (root && root === crawlData.networkPath) return { files: crawlData.network, dirs: crawlData.networkDirs };
   return null;
@@ -257,13 +262,27 @@ function createWindow() {
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 }
 
-app.whenReady().then(() => {
-  cleanupTempFiles();
-  createWindow();
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+// Второй экземпляр не запускаем. Две копии делят и служебную папку на приёмнике,
+// и кеши в userData: restoreStage второго запуска на старте вернёт «брошенные»
+// оригиналы прямо из-под первого, который в этот момент ими и занят. Вместо
+// нового окна поднимаем уже открытое.
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (!mainWindow) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
   });
-});
+
+  app.whenReady().then(() => {
+    cleanupTempFiles();
+    createWindow();
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    });
+  });
+}
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
@@ -287,7 +306,13 @@ ipcMain.handle('pick-folder', async () => {
 // Возвращает объединение папок с обеих сторон, без рекурсии — быстро даже по сети.
 // force=true сбрасывает кеш сканов (кнопка «Обновить»).
 ipcMain.handle('list-folders', async (_event, { localPath, networkPath, relPath = '', force, needMtime = false }) => {
-  if (force) scanCache.clear();
+  if (force) {
+    scanCache.clear();
+    // «Обновить» жмут именно потому, что данные под руками устарели. Индекс
+    // обхода — такие же данные: не сбросить его значило бы читать заново только
+    // список папок, а план по-прежнему строить по старому снимку.
+    crawlData = null;
+  }
 
   const localDir = localPath ? path.join(localPath, relPath) : null;
   const networkDir = networkPath ? path.join(networkPath, relPath) : null;
@@ -348,6 +373,9 @@ const MAX_CRAWL = 300000;
 
 ipcMain.handle('stop-crawl', () => {
   crawlToken += 1;
+  // Обход остановлен — обновлять индекс больше нечему, а несвежий он опаснее
+  // отсутствующего: план по нему выглядит достоверным. Пусть план сканирует сам.
+  crawlData = null;
 });
 // Текущий обход — чтобы сохранить прогресс при закрытии окна.
 let activeCrawl = null; // { index, localPath, networkPath }
@@ -404,6 +432,7 @@ ipcMain.handle('start-crawl', async (event, { localPath, networkPath, noLimit = 
     localDirs: dirLocal,
     networkDirs: dirNetwork,
     complete: false,
+    at: 0,
   };
   let scanned = 0;
   let batch = [];
@@ -476,6 +505,7 @@ ipcMain.handle('start-crawl', async (event, { localPath, networkPath, noLimit = 
     // нечего — план пересканирует стороны заново.
     if (crawlData && crawlData.local === fileLocal) {
       crawlData.complete = trusted; // только полный обход годится вместо скана
+      crawlData.at = Date.now();
     }
     post('crawl-done', { scanned, ok: true, partial: !trusted });
     return { ok: true, scanned, partial: !trusted };
@@ -693,7 +723,12 @@ ipcMain.handle('sync', async (event, { localPath, networkPath, folders, excludes
         .filter((e) => !failSet.has(`${action} ${e.path}`))
         .map((e) => ({ action, path: label(e) }));
 
+    // Конфликты типа тоже убирают узел с приёмника — в истории им место рядом
+    // с остальными удалениями, иначе итог обещает больше, чем перечисляет.
+    const conflictEntries = (plan.conflicts || []).map((rel) => ({ path: rel }));
+
     const allEntries = [
+      ...collect('trash', conflictEntries),
       ...collect('trash', plan.trash),
       ...collect('move', plan.moves, (m) => `${m.from} → ${m.to}`),
       ...collect('overwrite', plan.overwrite),

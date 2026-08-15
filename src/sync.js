@@ -69,13 +69,6 @@ function keyByName(entry) {
   return `${entry.size}:${baseName(entry.path)}`;
 }
 
-// Запасной ключ — для переноса, при котором файл ещё и переименовали. Имени нет,
-// поэтому здесь дата обязана совпасть точно: без имени только она отличает
-// действительно тот же файл от случайно одноразмерного чужого.
-function keyByExactTime(entry) {
-  return `${entry.size}:${Math.round(entry.mtimeMs)}`;
-}
-
 function groupBy(entries, keyOf) {
   const groups = new Map();
   for (const e of entries) {
@@ -115,15 +108,19 @@ function pairUp(gone, added, keyOf, sameFile, moves) {
 // скопировалось бы по новому пути.
 // Пути в плане должны быть от общего корня, иначе перенос между выбранными
 // ветками не будет виден.
+//
+// Пара признаётся переносом только при совпадении имени. Раньше был и второй
+// проход — без имени, по одному лишь «размер + дата до миллисекунды». Он тихо
+// портил данные: удалённый на приёмнике файл и новый на источнике случайно
+// совпадают такой парой чаще, чем кажется (распаковка архива, git checkout,
+// robocopy проставляют одинаковые метки времени пачкой). Приёмник получал
+// содержимое чужого файла, отчёт показывал «Готово», а следующий запуск разницы
+// уже не видел: rename сохранил дату, и файлы выглядели одинаковыми.
+// Перенос с одновременным переименованием теперь идёт обычным копированием —
+// медленнее, зато с верным содержимым.
 function detectMoves(plan) {
   const moves = [];
-  // Первый проход: имя сохранилось. Так выглядит перенос файла и переименование
-  // папки — самые частые случаи.
-  const first = pairUp(plan.trash, plan.copy, keyByName, (src, dst) => !isChanged(src, dst), moves);
-  // Второй проход: файл ещё и переименовали. Требование точной даты делает его
-  // осторожным — по сети он просто не сработает, и файл поедет обычным копированием.
-  const rest = pairUp(first.gone, first.added, keyByExactTime, () => true, moves);
-
+  const rest = pairUp(plan.trash, plan.copy, keyByName, (src, dst) => !isChanged(src, dst), moves);
   return { ...plan, moves, copy: rest.added, trash: rest.gone };
 }
 
@@ -139,17 +136,20 @@ function planDirs(srcDirs, dstDirs) {
 }
 
 // Сводка плана для окна предпросмотра.
+// Конфликты типа (на источнике папка, на приёмнике файл с тем же именем, или
+// наоборот) считаем удалением: с приёмника узел действительно убирается.
 function summarize(plan) {
   const moves = plan.moves ? plan.moves.length : 0;
   const dirs = plan.dirs ? plan.dirs.create.length + plan.dirs.remove.length : 0;
+  const trash = plan.trash.length + (plan.conflicts ? plan.conflicts.length : 0);
   return {
     move: moves,
     copy: plan.copy.length,
     overwrite: plan.overwrite.length,
-    trash: plan.trash.length,
+    trash,
     unchanged: plan.unchanged.length,
     dirs,
-    total: moves + plan.copy.length + plan.overwrite.length + plan.trash.length + dirs,
+    total: moves + plan.copy.length + plan.overwrite.length + trash + dirs,
   };
 }
 

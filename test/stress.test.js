@@ -108,6 +108,14 @@ test('случайные изменения: после синхронизаци
     await writeFile(src, 'СовсемНовая/новьё.txt', 'свежак');
     await fsp.mkdir(path.join(dst, 'Лишняя/Глубже'), { recursive: true });
 
+    // Конфликты типа: одно имя — папка на одной стороне и файл на другой.
+    // И в корне выбранной ветки, и в глубине.
+    await writeFile(src, 'Док/узел/внутри.txt', 'папка на источнике');
+    await writeFile(dst, 'Док/узел', 'файл на приёмнике');
+    await writeFile(dst, 'Фото/лето/старое.jpg', 'папка на приёмнике');
+    await fsp.rm(path.join(src, 'Фото/лето'), { recursive: true, force: true });
+    await writeFile(src, 'Фото/лето', 'файл на источнике');
+
     const roots = ['Док', 'Фото', 'Архив', 'СовсемНовая', 'Лишняя'];
     const plan = await buildRunPlan(src, dst, roots, [], liveScan);
     const res = await applyPlan(src, dst, plan, mockTrash);
@@ -141,6 +149,9 @@ test('остановка в любой точке возвращает приё�
     await fsp.rename(path.join(src, 'Архив'), path.join(src, 'Архив2'));
     await writeFile(dst, 'Лишний/мусор.txt', 'выкинуть');
     await fsp.mkdir(path.join(src, 'ПустаяНовая'), { recursive: true });
+    // Конфликт типа: остановка на нём тоже обязана откатиться.
+    await writeFile(src, 'Док/узел/внутри.txt', 'папка на источнике');
+    await writeFile(dst, 'Док/узел', 'файл на приёмнике');
 
     const before = await snapshot(dst);
     const roots = ['Док', 'Фото', 'Архив', 'Архив2', 'Лишний', 'ПустаяНовая'];

@@ -9,6 +9,7 @@ const path = require('node:path');
 
 const { buildRunPlan, countByFolder, ancestorsOf } = require('../src/plan');
 const { scanFiles, applyPlan, STAGE_DIR } = require('../src/fsops');
+const { summarize } = require('../src/sync');
 
 async function tmpDir() {
   return fsp.mkdtemp(path.join(os.tmpdir(), 'syncglass-plan-'));
@@ -230,4 +231,129 @@ test('родительская папка создаётся, когда её н
     await fsp.readFile(path.join(dst, 'Документы', '2024', 'новое.txt'), 'utf8'),
     'копировать'
   );
+});
+
+test('ложный перенос по размеру и дате не подменяет содержимое на приёмнике', async () => {
+  const src = await tmpDir();
+  const dst = await tmpDir();
+  await writeFile(src, 'новое/данные.bin', 'AAAA');
+  await writeFile(dst, 'старое/архив.bin', 'BBBB'); // тот же размер, чужое содержимое
+  const stamp = new Date(1700000000000);
+  await fsp.utimes(path.join(src, 'новое/данные.bin'), stamp, stamp);
+  await fsp.utimes(path.join(dst, 'старое/архив.bin'), stamp, stamp);
+
+  const plan = await buildRunPlan(src, dst, ['новое', 'старое'], [], liveScan);
+  assert.strictEqual(plan.moves.length, 0);
+
+  await applyPlan(src, dst, plan, mockTrash);
+  assert.strictEqual(await fsp.readFile(path.join(dst, 'новое/данные.bin'), 'utf8'), 'AAAA');
+  assert.strictEqual(fs.existsSync(path.join(dst, 'старое/архив.bin')), false);
+});
+
+test('на источнике папка, на приёмнике файл с тем же именем', async () => {
+  const src = await tmpDir();
+  const dst = await tmpDir();
+  await writeFile(src, 'отчёты/май.txt', 'данные');
+  await writeFile(dst, 'отчёты', 'а тут был файл');
+
+  const plan = await buildRunPlan(src, dst, ['отчёты'], [], liveScan);
+  assert.deepStrictEqual(plan.conflicts, ['отчёты']);
+
+  const res = await applyPlan(src, dst, plan, mockTrash);
+  assert.deepStrictEqual(res.failures, []);
+  assert.deepStrictEqual(await treeOf(dst), await treeOf(src));
+});
+
+test('на источнике файл, на приёмнике папка с тем же именем', async () => {
+  const src = await tmpDir();
+  const dst = await tmpDir();
+  await writeFile(src, 'отчёты', 'теперь это файл');
+  await writeFile(dst, 'отчёты/май.txt', 'старые данные');
+
+  const plan = await buildRunPlan(src, dst, ['отчёты'], [], liveScan);
+  assert.deepStrictEqual(plan.conflicts, ['отчёты']);
+
+  const res = await applyPlan(src, dst, plan, mockTrash);
+  assert.deepStrictEqual(res.failures, []);
+  assert.deepStrictEqual(await treeOf(dst), await treeOf(src));
+  assert.strictEqual(await fsp.readFile(path.join(dst, 'отчёты'), 'utf8'), 'теперь это файл');
+});
+
+test('остановка на конфликте типов возвращает приёмник как было', async () => {
+  const src = await tmpDir();
+  const dst = await tmpDir();
+  await writeFile(src, 'узел/файл.txt', 'новое');
+  await writeFile(dst, 'узел', 'исходный файл');
+  const before = await treeOf(dst);
+
+  const plan = await buildRunPlan(src, dst, ['узел'], [], liveScan);
+  const res = await applyPlan(src, dst, plan, mockTrash, () => {}, { shouldStop: () => true });
+
+  assert.strictEqual(res.cancelled, true);
+  assert.deepStrictEqual(await treeOf(dst), before);
+  assert.strictEqual(await fsp.readFile(path.join(dst, 'узел'), 'utf8'), 'исходный файл');
+});
+
+test('вложенная ветка получает свои счётчики, а не отдаёт их родителю', async () => {
+  const src = await tmpDir();
+  const dst = await tmpDir();
+  await writeFile(src, 'док/верх.txt', 'В');
+  await writeFile(src, 'док/скрытое/мимо.txt', 'М');
+  await writeFile(src, 'док/скрытое/нужное/глубоко.txt', 'Г');
+
+  // Отмечено 'док', снята отметка с 'док/скрытое', возвращена 'док/скрытое/нужное'.
+  const folders = ['док', 'док/скрытое/нужное'];
+  const plan = await buildRunPlan(src, dst, folders, ['док/скрытое'], liveScan);
+  const per = countByFolder(plan, folders);
+  const by = Object.fromEntries(per.map((p) => [p.folder, p.summary]));
+
+  assert.strictEqual(by['док'].copy, 1);
+  assert.strictEqual(by['док/скрытое/нужное'].copy, 1);
+
+  await applyPlan(src, dst, plan, mockTrash);
+  assert.strictEqual(fs.existsSync(path.join(dst, 'док/скрытое/мимо.txt')), false);
+  assert.strictEqual(
+    await fsp.readFile(path.join(dst, 'док/скрытое/нужное/глубоко.txt'), 'utf8'),
+    'Г'
+  );
+});
+
+test('конфликт типов в глубине ветки разбирается за один запуск', async () => {
+  const src = await tmpDir();
+  const dst = await tmpDir();
+  // 'док/узел' — папка на источнике и файл на приёмнике.
+  await writeFile(src, 'док/узел/внутри.txt', 'новое');
+  await writeFile(dst, 'док/узел', 'а тут был файл');
+  // 'док/второй' — наоборот: файл на источнике, папка на приёмнике.
+  await writeFile(src, 'док/второй', 'файл');
+  await writeFile(dst, 'док/второй/старое.txt', 'мусор');
+
+  const plan = await buildRunPlan(src, dst, ['док'], [], liveScan);
+  assert.deepStrictEqual([...plan.conflicts].sort(), ['док/второй', 'док/узел']);
+
+  const res = await applyPlan(src, dst, plan, mockTrash);
+  assert.deepStrictEqual(res.failures, []);
+  assert.deepStrictEqual(await treeOf(dst), await treeOf(src));
+  assert.strictEqual(await fsp.readFile(path.join(dst, 'док/узел/внутри.txt'), 'utf8'), 'новое');
+  assert.strictEqual(await fsp.readFile(path.join(dst, 'док/второй'), 'utf8'), 'файл');
+
+  // Повтор не находит работы — приёмник действительно приведён в порядок.
+  const again = await buildRunPlan(src, dst, ['док'], [], liveScan);
+  assert.strictEqual(summarize(again).total, 0);
+});
+
+test('остановка на глубоком конфликте возвращает приёмник как было', async () => {
+  const src = await tmpDir();
+  const dst = await tmpDir();
+  await writeFile(src, 'док/узел/внутри.txt', 'новое');
+  await writeFile(dst, 'док/узел', 'исходный файл');
+  await writeFile(dst, 'док/сосед.txt', 'не трогать');
+  const before = await treeOf(dst);
+
+  const plan = await buildRunPlan(src, dst, ['док'], [], liveScan);
+  const res = await applyPlan(src, dst, plan, mockTrash, () => {}, { shouldStop: () => true });
+
+  assert.strictEqual(res.cancelled, true);
+  assert.deepStrictEqual(await treeOf(dst), before);
+  assert.strictEqual(await fsp.readFile(path.join(dst, 'док/узел'), 'utf8'), 'исходный файл');
 });

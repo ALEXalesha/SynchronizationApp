@@ -358,7 +358,16 @@ function renderTree() {
     return;
   }
 
-  walk(sortedRoots(), 0);
+  // Верхний уровень режем тем же пределом, что и вложенные: корень с десятками
+  // тысяч подпапок иначе строил бы столько же строк DOM на каждую перерисовку,
+  // а во время обхода она идёт раз в 400 мс — окно вставало намертво.
+  // Отметки при этом живут в state.marks, поэтому «Выбрать все» покрывает и
+  // непоказанные папки.
+  const roots = sortedRoots();
+  walk(roots.slice(0, CHILD_LIMIT), 0);
+  if (roots.length > CHILD_LIMIT) {
+    appendPlaceholder(`…ещё ${fmtNum(roots.length - CHILD_LIMIT)} (не показаны)`, 0);
+  }
   el.localList.scrollTop = lScroll;
   el.networkList.scrollTop = rScroll;
   updateControls();
@@ -540,8 +549,12 @@ window.api.onCrawl({
     mergeSizes(entries);
     setStatus('busy', 'Загрузка размеров и файлов…', `${fmtNum(scanned)} объектов`);
   },
-  onDone: ({ scanned, ok, toobig }) => {
-    if (ok) setStatus('done', 'Готово', `${fmtNum(scanned)} объектов`);
+  onDone: ({ scanned, ok, toobig, partial }) => {
+    // partial — сторона пропала посреди обхода. Размеры показать можно, но они
+    // неполные, и молчаливое «Готово» выдало бы их за полную картину.
+    if (ok && partial)
+      setStatus('error', 'Связь оборвалась — размеры неполные, нажмите «Обновить»', `${fmtNum(scanned)} объектов`);
+    else if (ok) setStatus('done', 'Готово', `${fmtNum(scanned)} объектов`);
     else if (toobig)
       setStatus('error', 'Слишком много файлов — подсчёт размеров остановлен', `${fmtNum(scanned)}+`);
     else setStatus('error', 'Не удалось загрузить размеры');

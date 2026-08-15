@@ -55,7 +55,15 @@ async function planForBranch(srcRoot, dstRoot, branch, excludes, scan) {
     statType(dstRoot, branch),
   ]);
 
+  // Разные типы под одним именем: на источнике папка, на приёмнике файл (или
+  // наоборот). Приёмник надо расчистить, и отдельным действием: readdir по файлу
+  // рушил весь скан с ENOTDIR, а копирование файла поверх папки падало с EPERM.
+  const conflict = !!branch && srcType !== 'missing' && dstType !== 'missing' && srcType !== dstType;
+  const conflicts = conflict ? [branch] : [];
+
   if (srcType === 'file' || (srcType === 'missing' && dstType === 'file')) {
+    // statEntry отдаёт null для папки, поэтому при конфликте приёмник и так
+    // считается пустым — узел уберёт фаза конфликтов.
     const [srcE, dstE] = await Promise.all([
       statEntry(srcRoot, branch),
       statEntry(dstRoot, branch),
@@ -64,15 +72,31 @@ async function planForBranch(srcRoot, dstRoot, branch, excludes, scan) {
       plan: planSync(srcE ? [srcE] : [], dstE ? [dstE] : []),
       srcDirs: [],
       dstDirs: [],
+      conflicts,
     };
   }
 
+  // Сторону, которая не папка, не сканируем: readdir по файлу бросает ENOTDIR
+  // и обрывает предпросмотр целиком.
   const [src, dst] = await Promise.all([
-    scan(srcRoot, branch, excludes),
-    scan(dstRoot, branch, excludes),
+    srcType === 'dir' ? scan(srcRoot, branch, excludes) : { files: [], dirs: [] },
+    dstType === 'dir' ? scan(dstRoot, branch, excludes) : { files: [], dirs: [] },
   ]);
   const under = (rel) => (branch ? `${branch}/${rel}` : rel);
   const rebase = (entries) => entries.map((e) => ({ ...e, path: under(e.path) }));
+
+  // Тот же конфликт типов, но в глубине ветки. Скан его переживает — типы он
+  // читает из dirent на каждой стороне отдельно, — а вот план ломался: mkdir
+  // упирался в файл, копирование ложилось поверх папки, и запуск заканчивался
+  // горстью ошибок, которые расходились только со второго запуска.
+  // Приёмник расчищаем целиком одним действием, поэтому всё, что лежало внутри
+  // такого узла, из плана вычёркиваем: к моменту удаления по одному его уже нет.
+  // Результат скана при этом не трогаем — он лежит в кеше и переживёт нас.
+  const inner = findTypeConflicts(src, dst);
+  const covered = (rel) => inner.some((c) => rel === c || rel.startsWith(c + '/'));
+  const dstFiles = inner.length ? dst.files.filter((e) => !covered(e.path)) : dst.files;
+  const dstDirs = inner.length ? dst.dirs.filter((d) => !covered(d)) : dst.dirs;
+  appendAll(conflicts, inner.map(under));
 
   // Сама ветка — часть структуры: без неё пустая выбранная папка не создастся,
   // а лишняя не уберётся. Родителей же проверяем на каждой стороне отдельно:
@@ -86,10 +110,23 @@ async function planForBranch(srcRoot, dstRoot, branch, excludes, scan) {
   ]);
 
   return {
-    plan: planSync(rebase(src.files), rebase(dst.files)),
+    plan: planSync(rebase(src.files), rebase(dstFiles)),
     srcDirs: [...srcParents, ...(srcType === 'dir' ? [...self, ...src.dirs.map(under)] : [])],
-    dstDirs: [...dstParents, ...(dstType === 'dir' ? [...self, ...dst.dirs.map(under)] : [])],
+    dstDirs: [...dstParents, ...(dstType === 'dir' ? [...self, ...dstDirs.map(under)] : [])],
+    conflicts,
   };
+}
+
+// Узлы, которые на источнике папка, а на приёмнике файл (или наоборот).
+// Пути — относительно ветки, как их отдал скан.
+function findTypeConflicts(src, dst) {
+  const out = [];
+  if (src.files.length === 0 && src.dirs.length === 0) return out;
+  const dstFileSet = new Set(dst.files.map((e) => e.path));
+  const dstDirSet = new Set(dst.dirs);
+  for (const d of src.dirs) if (dstFileSet.has(d)) out.push(d);
+  for (const e of src.files) if (dstDirSet.has(e.path)) out.push(e.path);
+  return out;
 }
 
 // Дописывает items в конец target. Именно циклом, а не push(...items):
@@ -106,27 +143,35 @@ async function buildRunPlan(srcRoot, dstRoot, folders, excludes, scan) {
   const merged = { copy: [], overwrite: [], trash: [], unchanged: [] };
   const srcDirs = [];
   const dstDirs = [];
+  const conflicts = [];
 
   for (const folder of folders) {
     const branch = await planForBranch(srcRoot, dstRoot, folder, excludes, scan);
     for (const key of Object.keys(merged)) appendAll(merged[key], branch.plan[key]);
     appendAll(srcDirs, branch.srcDirs);
     appendAll(dstDirs, branch.dstDirs);
+    appendAll(conflicts, branch.conflicts);
   }
 
   const plan = detectMoves(merged);
   plan.dirs = planDirs(srcDirs, dstDirs);
+  plan.conflicts = conflicts;
   return plan;
 }
 
 // Счётчики по каждой выбранной ветке — для списка в окне предпросмотра.
-// Ветки после pruneDescendants не вложены друг в друга, поэтому путь принадлежит
-// не более чем одной из них.
+// Ветки могут быть вложены друг в друга: снять отметку с подпапки, а потом
+// вернуть её вложенной части — законный сценарий, и тогда выбраны и 'docs',
+// и 'docs/a/b'. Путь засчитываем самой длинной подходящей ветке, иначе вся
+// работа вложенной ветки утекала бы в родителя, а сама она показывала бы
+// «без изменений».
 function countByFolder(plan, folders) {
   const blank = () => ({ move: 0, copy: 0, overwrite: 0, trash: 0, unchanged: 0, dirs: 0, total: 0 });
   const counts = new Map(folders.map((f) => [f, blank()]));
+  // От длинных к коротким: первое совпадение и есть самая точная ветка.
+  const bySpecificity = [...folders].sort((a, b) => b.length - a.length);
   const bucketFor = (rel) => {
-    for (const f of folders) if (rel === f || rel.startsWith(f + '/')) return counts.get(f);
+    for (const f of bySpecificity) if (rel === f || rel.startsWith(f + '/')) return counts.get(f);
     return null;
   };
 
@@ -137,6 +182,10 @@ function countByFolder(plan, folders) {
       const bucket = bucketFor(e.path);
       if (bucket) bucket[key] += 1;
     }
+  }
+  for (const rel of plan.conflicts || []) {
+    const bucket = bucketFor(rel);
+    if (bucket) bucket.trash += 1;
   }
   for (const rel of [...plan.dirs.create, ...plan.dirs.remove]) {
     const bucket = bucketFor(rel);

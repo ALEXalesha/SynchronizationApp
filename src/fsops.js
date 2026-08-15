@@ -313,9 +313,11 @@ async function applyPlan(srcRoot, dstRoot, plan, trashFn, onProgress = () => {},
   const moves = plan.moves || [];
   const dirsCreate = (plan.dirs && plan.dirs.create) || [];
   const dirsRemove = (plan.dirs && plan.dirs.remove) || [];
+  const conflicts = plan.conflicts || [];
   const stageRoot = path.join(dstRoot, STAGE_DIR);
 
   const total =
+    conflicts.length +
     dirsCreate.length +
     moves.length +
     plan.copy.length +
@@ -326,7 +328,11 @@ async function applyPlan(srcRoot, dstRoot, plan, trashFn, onProgress = () => {},
   let done = 0;
   let stopped = false;
   const failures = [];
-  const journal = { mkdir: [], move: [], copy: [], overwrite: [], stage: [], rmdir: [] };
+  // conflict живёт отдельно от stage, хотя убирает файлы тем же способом:
+  // откат разворачивает журнал ровно в обратном порядке фаз, а конфликты идут
+  // самой первой фазой — значит возвращать их надо самыми последними, уже после
+  // того, как исчезнут папки, созданные на их месте.
+  const journal = { conflict: [], mkdir: [], move: [], copy: [], overwrite: [], stage: [], rmdir: [] };
 
   const report = (action, relPath) => {
     done += 1;
@@ -455,12 +461,43 @@ async function applyPlan(srcRoot, dstRoot, plan, trashFn, onProgress = () => {},
     report('trash', entry.path);
   };
 
-  // Папки создаём от мелких к глубоким, поэтому по порядку и без пула.
-  for (const rel of dirsCreate) {
-    if (shouldStop()) {
-      stopped = true;
-      break;
+  // Узел, у которого на сторонах разный тип: на источнике папка, а на приёмнике
+  // файл с тем же именем (или наоборот). Убираем его первым делом — иначе mkdir
+  // упрётся в файл, а копирование файла ляжет поверх папки и упадёт. Уезжает он
+  // тем же путём, что и остальные оригиналы: в служебную папку, поэтому остановка
+  // возвращает его на место, а Корзину он увидит только в самом конце.
+  const doConflict = async (rel) => {
+    try {
+      await stash(rel);
+      journal.conflict.push(rel);
+    } catch {
+      // Отложить не вышло — убираем сразу, вернуть будет нечем.
+      try {
+        await trashFn(path.join(dstRoot, rel));
+        unrecoverable += 1;
+      } catch (err) {
+        fail('trash', rel, err);
+      }
     }
+    report('trash', rel);
+  };
+
+  // Последовательный вариант phase: для папок порядок важен, пул тут не годится.
+  const steps = async (items, worker) => {
+    if (stopped) return;
+    for (const item of items) {
+      if (shouldStop()) {
+        stopped = true;
+        return;
+      }
+      await worker(item);
+    }
+  };
+
+  await steps(conflicts, doConflict);
+
+  // Папки создаём от мелких к глубоким, поэтому по порядку и без пула.
+  await steps(dirsCreate, async (rel) => {
     try {
       await fsp.mkdir(path.join(dstRoot, rel), { recursive: true });
       journal.mkdir.push(rel);
@@ -468,7 +505,7 @@ async function applyPlan(srcRoot, dstRoot, plan, trashFn, onProgress = () => {},
       fail('mkdir', rel, err);
     }
     report('mkdir', rel);
-  }
+  });
 
   await phase(moves, doMove);
   await phase(plan.copy, doCopy);
@@ -478,21 +515,15 @@ async function applyPlan(srcRoot, dstRoot, plan, trashFn, onProgress = () => {},
   // Лишние папки убираем от глубоких к мелким. Именно rmdir, а не rm -r:
   // он падает на непустой папке, и это защита — если внутри осталось что-то
   // исключённое из синхронизации, папка уцелеет.
-  if (!stopped) {
-    for (const rel of dirsRemove) {
-      if (shouldStop()) {
-        stopped = true;
-        break;
-      }
-      try {
-        await fsp.rmdir(path.join(dstRoot, rel));
-        journal.rmdir.push(rel);
-      } catch {
-        // не пустая или уже нет — так и задумано
-      }
-      report('rmdir', rel);
+  await steps(dirsRemove, async (rel) => {
+    try {
+      await fsp.rmdir(path.join(dstRoot, rel));
+      journal.rmdir.push(rel);
+    } catch {
+      // не пустая или уже нет — так и задумано
     }
-  }
+    report('rmdir', rel);
+  });
 
   if (stopped) {
     await rollback(dstRoot, stageRoot, journal);
@@ -503,10 +534,11 @@ async function applyPlan(srcRoot, dstRoot, plan, trashFn, onProgress = () => {},
   // Одним действием на всю папку: это на порядок быстрее, чем по файлу,
   // и в Корзине запуск лежит одной восстановимой пачкой.
   let trashed = 0;
-  if (journal.stage.length + journal.overwrite.length > 0) {
+  const parkedCount = journal.stage.length + journal.overwrite.length + journal.conflict.length;
+  if (parkedCount > 0) {
     try {
       await trashFn(stageRoot);
-      trashed = journal.stage.length + journal.overwrite.length;
+      trashed = parkedCount;
       // Убираем каркас папок, если trashFn забрал только содержимое.
       await removeStageIfEmpty(stageRoot);
     } catch (err) {
@@ -553,6 +585,21 @@ async function rollback(dstRoot, stageRoot, journal) {
   for (const rel of [...journal.mkdir].reverse()) {
     await fsp.rmdir(abs(rel)).catch(() => {});
   }
+
+  // Конфликтные узлы — последними: на их месте стояла папка (или файл) из фаз
+  // выше, и вернуть оригинал можно только теперь, когда место освободилось.
+  await runPool(journal.conflict, APPLY_CONCURRENCY, async (rel) => {
+    await ensureDir(path.dirname(abs(rel))).catch(() => {});
+    try {
+      await fsp.rename(path.join(stageRoot, rel), abs(rel));
+    } catch {
+      // Место всё ещё занято тем, что успел создать этот же запуск (папка, из
+      // которой не убрался неудавшийся файл). Убираем помеху и пробуем ещё раз.
+      // Сносим только после неудачной попытки: вслепую тут ничего не удаляем.
+      await fsp.rm(abs(rel), { recursive: true, force: true }).catch(() => {});
+      await fsp.rename(path.join(stageRoot, rel), abs(rel)).catch(() => {});
+    }
+  });
 
   // Всё, что удалось вернуть, уже на местах. Если внутри что-то осталось,
   // папку не трогаем — разберём на следующем запуске.
