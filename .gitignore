@@ -4,3 +4,4 @@ dist/
 .DS_Store
 .remember/
 scratch_*.txt
+dist-new/
