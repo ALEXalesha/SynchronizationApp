@@ -5,3 +5,4 @@ dist/
 .remember/
 scratch_*.txt
 dist-new/
+dist-build/
