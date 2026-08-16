@@ -101,7 +101,18 @@ function pairUp(gone, added, keyOf, sameFile, moves) {
     const to = addedBy.get(key);
     if (!to || from.length !== 1 || to.length !== 1) continue;
     if (!sameFile(to[0], from[0])) continue;
-    moves.push({ from: from[0].path, to: to[0].path, path: to[0].path, size: to[0].size });
+    // gone/added — исходные записи пары. Пара пока лишь кандидат: имя, размер
+    // и дата совпадают у разных файлов чаще, чем кажется, и решает сверка
+    // содержимого уже в планировщике. Не подтвердится — из этих двух записей
+    // и собирается обратно обычная пара «скопировать + выбросить».
+    moves.push({
+      from: from[0].path,
+      to: to[0].path,
+      path: to[0].path,
+      size: to[0].size,
+      gone: from[0],
+      added: to[0],
+    });
     taken.add(from[0].path);
     taken.add(to[0].path);
   }
@@ -126,6 +137,10 @@ function pairUp(gone, added, keyOf, sameFile, moves) {
 // уже не видел: rename сохранил дату, и файлы выглядели одинаковыми.
 // Перенос с одновременным переименованием теперь идёт обычным копированием —
 // медленнее, зато с верным содержимым.
+//
+// Совпадения имени этому мало: два разных config.json по 512 байт, записанных
+// одной распаковкой, проходят проверку целиком. Поэтому здесь только кандидаты,
+// а последнее слово за сверкой содержимого в confirmMoves.
 function detectMoves(plan) {
   const moves = [];
   const rest = pairUp(plan.trash, plan.copy, keyByName, (src, dst) => !isChanged(src, dst), moves);

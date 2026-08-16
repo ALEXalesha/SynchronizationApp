@@ -532,3 +532,99 @@ test('счётчик ветки учитывает её собственных �
   assert.strictEqual(row.summary.dirs, totals.dirs);
   assert.strictEqual(row.summary.total, totals.total);
 });
+
+// ---- Кандидаты в перемещения ----
+
+// Имя, размер и дата сходились у двух совершенно разных файлов, и приёмник
+// переименовывал свой старый файл в новый путь: на месте нового оказывалось
+// чужое содержимое. Следующий запуск разницы уже не видел — имя, размер и дата
+// сходятся, — и порча оставалась навсегда.
+test('одинаковые имя, размер и дата, но разное содержимое — это не перемещение', async () => {
+  const src = await tmpDir();
+  const dst = await tmpDir();
+  const when = new Date(2020, 0, 1);
+  await writeFile(src, 'д/новая/config.json', 'AAAAA');
+  await writeFile(dst, 'д/старая/config.json', 'BBBBB');
+  await fsp.utimes(path.join(src, 'д/новая/config.json'), when, when);
+  await fsp.utimes(path.join(dst, 'д/старая/config.json'), when, when);
+
+  const plan = await buildRunPlan(src, dst, ['д'], [], liveScan);
+  assert.strictEqual(plan.moves.length, 0, 'пара по метаданным обязана отсеяться сверкой');
+  assert.deepStrictEqual(plan.copy.map((e) => e.path), ['д/новая/config.json']);
+  assert.deepStrictEqual(plan.trash.map((e) => e.path), ['д/старая/config.json']);
+
+  await applyPlan(src, dst, plan, mockTrash);
+  assert.strictEqual(
+    await fsp.readFile(path.join(dst, 'д/новая/config.json'), 'utf8'),
+    'AAAAA',
+    'приёмник получил содержимое чужого файла'
+  );
+});
+
+test('настоящее перемещение по-прежнему обходится переименованием', async () => {
+  const src = await tmpDir();
+  const dst = await tmpDir();
+  await writeFile(src, 'д/старая/отчёт.pdf', 'x'.repeat(200000));
+  await fsp.cp(src, dst, { recursive: true });
+  await fsp.mkdir(path.join(src, 'д/новая'), { recursive: true });
+  await fsp.rename(path.join(src, 'д/старая/отчёт.pdf'), path.join(src, 'д/новая/отчёт.pdf'));
+
+  const plan = await buildRunPlan(src, dst, ['д'], [], liveScan);
+  assert.strictEqual(plan.moves.length, 1);
+  assert.strictEqual(plan.copy.length, 0);
+  assert.strictEqual(plan.trash.length, 0);
+});
+
+// ---- Конфликт типа в предке ветки ----
+
+// Внутрь файла не проходит ничего: mkdir отвечает EEXIST, копирование — ENOTDIR.
+// Ветка не синхронизировалась никогда, и каждый запуск заканчивался одними
+// и теми же ошибками с путями, которых на приёмнике вообще нет.
+test('предок выбранной ветки — файл на приёмнике: узел убирается, ветка доезжает', async () => {
+  const src = await tmpDir();
+  const dst = await tmpDir();
+  await writeFile(src, 'a/b/нужный.txt', 'нужен');
+  await writeFile(dst, 'a', 'на приёмнике это файл');
+
+  const plan = await buildRunPlan(src, dst, ['a/b'], [], liveScan);
+  assert.deepStrictEqual(plan.conflicts, ['a']);
+
+  const res = await applyPlan(src, dst, plan, mockTrash);
+  assert.strictEqual(res.failures.length, 0);
+  assert.deepStrictEqual(await treeOf(dst), ['a/', 'a/b/', 'a/b/нужный.txt']);
+});
+
+test('общий конфликтный предок двух веток убирается один раз', async () => {
+  const src = await tmpDir();
+  const dst = await tmpDir();
+  await writeFile(src, 'a/b/один.txt', '1');
+  await writeFile(src, 'a/c/два.txt', '2');
+  await writeFile(dst, 'a', 'на приёмнике это файл');
+
+  const plan = await buildRunPlan(src, dst, ['a/b', 'a/c'], [], liveScan);
+  assert.deepStrictEqual(plan.conflicts, ['a'], 'повтор увёл бы отчёт в «удалено безвозвратно»');
+
+  const res = await applyPlan(src, dst, plan, mockTrash);
+  assert.strictEqual(res.failures.length, 0);
+  assert.strictEqual(res.unrecoverable, 0);
+  assert.deepStrictEqual(await treeOf(dst), ['a/', 'a/b/', 'a/b/один.txt', 'a/c/', 'a/c/два.txt']);
+});
+
+test('остановка возвращает на место файл, снятый конфликтом в предке', async () => {
+  const src = await tmpDir();
+  const dst = await tmpDir();
+  await writeFile(src, 'a/b/нужный.txt', 'нужен');
+  await writeFile(dst, 'a', 'на приёмнике это файл');
+  const before = await treeOf(dst);
+
+  const plan = await buildRunPlan(src, dst, ['a/b'], [], liveScan);
+  let steps = 0;
+  const res = await applyPlan(src, dst, plan, mockTrash, () => { steps += 1; }, {
+    shouldStop: () => steps >= 2,
+  });
+
+  assert.strictEqual(res.cancelled, true);
+  assert.deepStrictEqual(await treeOf(dst), before);
+  assert.strictEqual(await fsp.readFile(path.join(dst, 'a'), 'utf8'), 'на приёмнике это файл');
+  assert.strictEqual(fs.existsSync(path.join(dst, STAGE_DIR)), false);
+});

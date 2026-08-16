@@ -165,6 +165,46 @@ async function ensureDir(dir) {
   await fsp.mkdir(dir, { recursive: true });
 }
 
+// Сколько байт сверяем с каждого конца, когда файл крупный. Мелкий читается
+// целиком: именно мелкие файлы (config.json, __init__.py, метки) чаще всего
+// и совпадают по имени с размером, будучи совершенно разными.
+const SAMPLE_BYTES = 65536;
+
+async function readAt(fh, size, pos) {
+  const buf = Buffer.alloc(size);
+  let got = 0;
+  while (got < size) {
+    const { bytesRead } = await fh.read(buf, got, size - got, pos + got);
+    if (bytesRead === 0) break;
+    got += bytesRead;
+  }
+  return got === size ? buf : buf.subarray(0, got);
+}
+
+async function edges(file, size) {
+  const fh = await fsp.open(file, 'r');
+  try {
+    if (size <= SAMPLE_BYTES * 2) return readAt(fh, size, 0);
+    return Buffer.concat([
+      await readAt(fh, SAMPLE_BYTES, 0),
+      await readAt(fh, SAMPLE_BYTES, size - SAMPLE_BYTES),
+    ]);
+  } finally {
+    await fh.close();
+  }
+}
+
+// Один ли это файл на двух сторонах. Читаем края, а не весь файл: переименование
+// дерева на сотню гигабайт иначе стоило бы столько же, сколько копирование,
+// а ради этого перемещения и распознаются.
+async function sameContent(a, b) {
+  const [sa, sb] = await Promise.all([fsp.stat(a), fsp.stat(b)]);
+  if (!sa.isFile() || !sb.isFile() || sa.size !== sb.size) return false;
+  if (sa.size === 0) return true;
+  const [ea, eb] = await Promise.all([edges(a, sa.size), edges(b, sb.size)]);
+  return ea.equals(eb);
+}
+
 // Возвращает true если скопировал, false если источник исчез (устаревшие данные).
 // ensure — чем создавать папку назначения. По умолчанию обычный mkdir, но
 // синхронизация передаёт сюда свой кеш: без него каждый файл тянул за собой
@@ -683,5 +723,8 @@ module.exports = {
   restoreStage,
   copyFile,
   ensureDir,
+  sameContent,
+  runPool,
+  APPLY_CONCURRENCY,
   STAGE_DIR,
 };

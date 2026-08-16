@@ -264,3 +264,47 @@ test('probe различает доступную и недоступную ст
   assert.strictEqual(пусто.localOk, false);
   assert.strictEqual(пусто.networkOk, false);
 });
+
+// Внутрь файла не проходит ни mkdir, ни копирование. Ветка не синхронизировалась
+// никогда, а отчёт показывал ошибки с путями, которых на приёмнике нет.
+test('файл на месте папки-предка не срывает синхронизацию выбранной ветки', async () => {
+  const { call } = await ready;
+  const local = await tmpDir();
+  const network = await tmpDir();
+  await writeFile(local, 'a/b/нужный.txt', 'нужен');
+  await writeFile(local, 'другое/ok.txt', 'ok');
+  await writeFile(network, 'a', 'на приёмнике это файл');
+
+  const args = {
+    localPath: local, networkPath: network,
+    folders: ['a/b', 'другое'], excludes: [], direction: 'toNetwork',
+  };
+  const pv = await call('preview', args);
+  assert.strictEqual(pv.totals.trash, 1, 'узел, занявший место папки, обязан быть в сводке');
+
+  const res = await call('sync', args);
+  assert.strictEqual(res.failures, 0);
+  assert.strictEqual(fs.readFileSync(path.join(network, 'a/b/нужный.txt'), 'utf8'), 'нужен');
+
+  const again = await call('preview', args);
+  assert.strictEqual(again.totals.total, 0, 'повтор не должен упираться в то же место');
+});
+
+// Направление «сеть → локально» — вторая половина приложения, и до сих пор
+// сквозным путём она не проходилась ни разу.
+test('сеть → локально сводит стороны так же, как и обратное направление', async () => {
+  const { call } = await ready;
+  const local = await tmpDir();
+  const network = await tmpDir();
+  await writeFile(network, 'док/новый.txt', 'новое');
+  await writeFile(local, 'док/лишний.txt', 'убрать');
+
+  const args = { localPath: local, networkPath: network, folders: ['док'], excludes: [], direction: 'toLocal' };
+  const pv = await call('preview', args);
+  assert.strictEqual(pv.totals.copy, 1);
+  assert.strictEqual(pv.totals.trash, 1);
+
+  const res = await call('sync', args);
+  assert.strictEqual(res.failures, 0);
+  assert.deepStrictEqual(await snapshot(local), await snapshot(network));
+});

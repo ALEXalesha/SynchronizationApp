@@ -4,9 +4,13 @@ const path = require('path');
 const fsp = require('fs').promises;
 
 const { planSync, detectMoves, planDirs } = require('./sync');
+const { sameContent, runPool, APPLY_CONCURRENCY } = require('./fsops');
 const { ciKey } = require('./paths');
 
 // Тип узла на стороне root: 'dir' | 'file' | 'missing'.
+// ENOTDIR — это путь, у которого один из предков файл. Узла там нет так же
+// надёжно, как при ENOENT (Windows и вовсе отвечает вторым на первое), а разбирать
+// предка — не дело stat: этим занимается фаза конфликтов.
 async function statType(root, rel) {
   try {
     const st = await fsp.stat(path.join(root, rel));
@@ -14,7 +18,7 @@ async function statType(root, rel) {
     if (st.isFile()) return 'file';
     return 'missing';
   } catch (err) {
-    if (err.code === 'ENOENT') return 'missing';
+    if (err.code === 'ENOENT' || err.code === 'ENOTDIR') return 'missing';
     throw err;
   }
 }
@@ -40,10 +44,9 @@ function ancestorsOf(branch) {
   return out;
 }
 
-// Из списка относительных путей оставляет те, что на стороне root — папки.
-async function existingDirs(root, rels) {
-  const types = await Promise.all(rels.map((rel) => statType(root, rel)));
-  return rels.filter((_, i) => types[i] === 'dir');
+// Типы списка относительных путей на стороне root, в том же порядке.
+async function typesOf(root, rels) {
+  return Promise.all(rels.map((rel) => statType(root, rel)));
 }
 
 // План для одной выбранной ветки (папки ИЛИ отдельного файла).
@@ -51,16 +54,35 @@ async function existingDirs(root, rels) {
 // перенос файла из одной выбранной ветки в другую.
 // scan(root, branch, excludes) → { files, dirs } с путями относительно branch.
 async function planForBranch(srcRoot, dstRoot, branch, excludes, scan) {
-  const [srcType, dstType] = await Promise.all([
+  // Родителей проверяем на каждой стороне отдельно: ветки может не быть
+  // на источнике, а её родитель там есть, и тогда удалять его на приёмнике
+  // нельзя — иначе с приёмника пропала бы живая папка.
+  const parents = branch ? ancestorsOf(branch) : [];
+  const [srcType, dstType, srcParentTypes, dstParentTypes] = await Promise.all([
     statType(srcRoot, branch),
     statType(dstRoot, branch),
+    typesOf(srcRoot, parents),
+    typesOf(dstRoot, parents),
   ]);
+  const srcParents = parents.filter((_, i) => srcParentTypes[i] === 'dir');
+  const dstParents = parents.filter((_, i) => dstParentTypes[i] === 'dir');
 
-  // Разные типы под одним именем: на источнике папка, на приёмнике файл (или
-  // наоборот). Приёмник надо расчистить, и отдельным действием: readdir по файлу
-  // рушил весь скан с ENOTDIR, а копирование файла поверх папки падало с EPERM.
-  const conflict = !!branch && srcType !== 'missing' && dstType !== 'missing' && srcType !== dstType;
-  const conflicts = conflict ? [branch] : [];
+  // Предок ветки, который на источнике папка, а на приёмнике файл. Внутрь такого
+  // узла не проходит ничего: mkdir отвечает EEXIST, копирование — ENOTDIR, и так
+  // на каждом запуске. Ветка молча не синхронизировалась никогда, а отчёт показывал
+  // горсть ошибок с путями, которых на приёмнике вообще нет. Убираем его той же
+  // фазой конфликтов, что и остальные несовпадения типов.
+  const conflicts = parents.filter(
+    (_, i) => srcParentTypes[i] === 'dir' && dstParentTypes[i] === 'file'
+  );
+
+  // Тот же конфликт, но на самой ветке: на источнике папка, на приёмнике файл
+  // (или наоборот). Приёмник надо расчистить, и отдельным действием: readdir
+  // по файлу рушил весь скан с ENOTDIR, а копирование файла поверх папки падало
+  // с EPERM.
+  if (branch && srcType !== 'missing' && dstType !== 'missing' && srcType !== dstType) {
+    conflicts.push(branch);
+  }
 
   if (srcType === 'file' || (srcType === 'missing' && dstType === 'file')) {
     // statEntry отдаёт null для папки, поэтому при конфликте приёмник и так
@@ -71,8 +93,8 @@ async function planForBranch(srcRoot, dstRoot, branch, excludes, scan) {
     ]);
     return {
       plan: planSync(srcE ? [srcE] : [], dstE ? [dstE] : []),
-      srcDirs: [],
-      dstDirs: [],
+      srcDirs: srcParents,
+      dstDirs: dstParents,
       conflicts,
     };
   }
@@ -104,15 +126,8 @@ async function planForBranch(srcRoot, dstRoot, branch, excludes, scan) {
   appendAll(conflicts, inner.map(under));
 
   // Сама ветка — часть структуры: без неё пустая выбранная папка не создастся,
-  // а лишняя не уберётся. Родителей же проверяем на каждой стороне отдельно:
-  // ветки может не быть на источнике, а её родитель там есть, и тогда удалять
-  // его на приёмнике нельзя — иначе с приёмника пропала бы живая папка.
-  const parents = branch ? ancestorsOf(branch) : [];
+  // а лишняя не уберётся.
   const self = branch ? [branch] : [];
-  const [srcParents, dstParents] = await Promise.all([
-    existingDirs(srcRoot, parents),
-    existingDirs(dstRoot, parents),
-  ]);
 
   return {
     plan: planSync(rebase(src.files), rebase(dstFiles)),
@@ -190,6 +205,60 @@ function appendAll(target, items) {
   for (const item of items) target.push(item);
 }
 
+// Оставляет только верхние конфликтные узлы: без повторов и без вложенных.
+// Общий предок двух выбранных веток приходит сюда дважды, а конфликт в глубине
+// ветки может оказаться внутри конфликтного предка. Узел уезжает в служебную
+// папку целиком, поэтому второй заход по тому же месту нашёл бы там пусто —
+// и записал бы в отчёт файл, удалённый безвозвратно, хотя он цел.
+function topConflicts(conflicts) {
+  const kept = [];
+  const keys = [];
+  for (const rel of [...conflicts].sort((a, b) => a.length - b.length)) {
+    const k = ciKey(rel);
+    if (keys.some((c) => k === c || k.startsWith(c + '/'))) continue;
+    kept.push(rel);
+    keys.push(k);
+  }
+  return kept;
+}
+
+// Сверяет кандидатов в перемещения по содержимому и разворачивает непрошедших
+// обратно в «скопировать + выбросить».
+//
+// Кандидат — пара «пропал на приёмнике / появился на источнике» с одинаковым
+// именем, размером и датой. Этого мало: два разных файла с общим именем
+// и размером получают одинаковую дату пачкой при распаковке архива, git checkout
+// и robocopy. Приёмник переименовывал свой старый файл в новый путь и получал
+// чужое содержимое, а следующий запуск разницы уже не видел — имя, размер и дата
+// сходились. Тихая порча, которую нельзя было заметить изнутри приложения.
+//
+// Читаем края, а не файл целиком: перемещение затем и распознаётся, что стоит
+// одного rename, и сверка не должна обходиться дороже самого копирования.
+async function confirmMoves(srcRoot, dstRoot, plan) {
+  if (plan.moves.length === 0) return;
+  const verdicts = new Array(plan.moves.length);
+  const idx = plan.moves.map((_, i) => i);
+  await runPool(idx, APPLY_CONCURRENCY, async (i) => {
+    const mv = plan.moves[i];
+    verdicts[i] = await sameContent(
+      path.join(srcRoot, mv.to),
+      path.join(dstRoot, mv.from)
+    ).catch(() => false);
+  });
+
+  const confirmed = [];
+  for (let i = 0; i < plan.moves.length; i += 1) {
+    const mv = plan.moves[i];
+    if (verdicts[i]) {
+      confirmed.push(mv);
+      continue;
+    }
+    plan.copy.push(mv.added);
+    plan.trash.push(mv.gone);
+  }
+  plan.moves = confirmed;
+}
+
 // Один план на весь запуск: ветки объединяются, и только потом ищутся перемещения.
 // Иначе перенос файла между двумя выбранными ветками остался бы незамеченным.
 async function buildRunPlan(srcRoot, dstRoot, folders, excludes, scan) {
@@ -207,8 +276,9 @@ async function buildRunPlan(srcRoot, dstRoot, folders, excludes, scan) {
   }
 
   const plan = detectMoves(merged);
+  await confirmMoves(srcRoot, dstRoot, plan);
   plan.dirs = planDirs(srcDirs, dstDirs);
-  plan.conflicts = conflicts;
+  plan.conflicts = topConflicts(conflicts);
   return plan;
 }
 

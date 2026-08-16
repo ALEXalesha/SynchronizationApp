@@ -1037,10 +1037,12 @@ async function probeTick() {
     state.sizeMode = 'off'; // миграция со старой настройки
   }
   el.sizeMode.value = state.sizeMode;
-  if (s.direction) setDirection(s.direction);
-  if (s.localPath) setPath('local', s.localPath);
-  if (s.networkPath) setPath('network', s.networkPath);
-  if (s.localPath || s.networkPath) await refresh({ force: true });
+  // Файл настроек мог испортиться (обрыв записи, правка руками). Путь не строкой
+  // главный процесс принимает за путь и роняет весь листинг на path.join.
+  if (s.direction === 'toNetwork' || s.direction === 'toLocal') setDirection(s.direction);
+  if (typeof s.localPath === 'string' && s.localPath) setPath('local', s.localPath);
+  if (typeof s.networkPath === 'string' && s.networkPath) setPath('network', s.networkPath);
+  if (state.localPath || state.networkPath) await refresh({ force: true });
   probeTick();
   setInterval(probeTick, 6000);
 })();
