@@ -243,8 +243,19 @@ function countByFolder(plan, folders) {
     const bucket = bucketFor(rel);
     if (bucket) bucket.trash += 1;
   }
+  // Папки считаем чуть шире: кроме вложенных в ветку, к ней относятся и её
+  // собственные родители. Для ветки 'a/b/c' план создаёт ещё 'a' и 'a/b',
+  // а внутрь 'a/b/c' они не вложены — bucketFor их не находил. В шапке они были,
+  // в списке по веткам нет, и сумма по строкам не сходилась с итогом.
+  const dirBucketFor = (rel) => {
+    const direct = bucketFor(rel);
+    if (direct) return direct;
+    const prefix = ciKey(rel) + '/';
+    for (const [f, kf] of bySpecificity) if (kf.startsWith(prefix)) return counts.get(f);
+    return null;
+  };
   for (const rel of [...plan.dirs.create, ...plan.dirs.remove]) {
-    const bucket = bucketFor(rel);
+    const bucket = dirBucketFor(rel);
     if (bucket) bucket.dirs += 1;
   }
   for (const bucket of counts.values()) {

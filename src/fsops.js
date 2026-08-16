@@ -82,45 +82,6 @@ async function scanInto(dir, rel, out, excludes, onFile, run, dirsOut) {
   return out;
 }
 
-// Список папок верхнего уровня внутри dir с числом файлов и суммарным размером.
-// Возвращает [{ name, fileCount, size }].
-async function listTopFolders(dir) {
-  let dirents;
-  try {
-    dirents = await fsp.readdir(dir, { withFileTypes: true });
-  } catch (err) {
-    if (err.code === 'ENOENT') return [];
-    throw err;
-  }
-
-  const folders = [];
-  for (const dirent of dirents) {
-    if (!dirent.isDirectory() || dirent.isSymbolicLink()) continue;
-    if (dirent.name === STAGE_DIR) continue;
-    const files = await scanFiles(path.join(dir, dirent.name));
-    const size = files.reduce((sum, f) => sum + f.size, 0);
-    folders.push({ name: dirent.name, fileCount: files.length, size });
-  }
-  folders.sort((a, b) => a.name.localeCompare(b.name));
-  return folders;
-}
-
-// Быстрый список имён папок верхнего уровня — только readdir, без рекурсии.
-// Используется для мгновенного показа списка; детали (размер/счёт) грузятся отдельно.
-async function listTopFolderNames(dir) {
-  let dirents;
-  try {
-    dirents = await fsp.readdir(dir, { withFileTypes: true });
-  } catch (err) {
-    if (err.code === 'ENOENT') return [];
-    throw err;
-  }
-  return dirents
-    .filter((d) => d.isDirectory() && !d.isSymbolicLink() && d.name !== STAGE_DIR)
-    .map((d) => d.name)
-    .sort((a, b) => a.localeCompare(b));
-}
-
 // Прямые дети папки: и подпапки, и файлы (без рекурсии).
 // Возвращает [{ name, isDir, mtimeMs }].
 // withMtime=false — только readdir (быстро, без stat по каждому; дата = 0).
@@ -205,11 +166,15 @@ async function ensureDir(dir) {
 }
 
 // Возвращает true если скопировал, false если источник исчез (устаревшие данные).
-async function copyFile(srcRoot, dstRoot, relPath) {
+// ensure — чем создавать папку назначения. По умолчанию обычный mkdir, но
+// синхронизация передаёт сюда свой кеш: без него каждый файл тянул за собой
+// отдельный рекурсивный mkdir, и на ветке в сотню тысяч файлов это была сотня
+// тысяч лишних обращений к сети — при том, что папка почти всегда одна и та же.
+async function copyFile(srcRoot, dstRoot, relPath, ensure = ensureDir) {
   const src = path.join(srcRoot, relPath);
   const dst = path.join(dstRoot, relPath);
 
-  await ensureDir(path.dirname(dst));
+  await ensure(path.dirname(dst));
   try {
     await fsp.copyFile(src, dst);
   } catch (err) {
@@ -258,22 +223,83 @@ async function runPool(items, concurrency, worker) {
   await Promise.all(runners);
 }
 
-// Убирает служебную папку, но только если внутри не осталось файлов.
+// Сносит пустые папки снизу вверх. Возвращает true, если dir остался пуст.
+// Пустой каркас внутри служебной папки — наших рук дело: его создавали мы сами,
+// раскладывая оригиналы по вложенным путям, и после возврата содержимого он
+// ничего не значит. Всё остальное — файл, ссылка, непустая ветка — значит, что
+// узел вернуть не удалось.
+async function pruneEmptyDirs(dir) {
+  let dirents;
+  try {
+    dirents = await fsp.readdir(dir, { withFileTypes: true });
+  } catch (err) {
+    if (err.code === 'ENOENT') return true; // папки нет — считаем пустой
+    return false; // заглянуть не вышло — тем более не трогаем
+  }
+  let empty = true;
+  for (const d of dirents) {
+    const sub = path.join(dir, d.name);
+    if (d.isDirectory() && !d.isSymbolicLink() && (await pruneEmptyDirs(sub))) {
+      try {
+        await fsp.rmdir(sub);
+        continue;
+      } catch {
+        // убрать не вышло — папка остаётся, и вместе с ней вся ветка
+      }
+    }
+    empty = false;
+  }
+  return empty;
+}
+
+// Убирает служебную папку, но только если внутри ничего не осталось.
 // Если что-то осталось (оригинал, который не удалось ни заменить, ни вернуть),
 // папка уцелеет: содержимое разберёт restoreStage на следующем запуске.
 // Стереть её вслепую значило бы уничтожить единственную копию файла молча.
+//
+// Содержимое считаем обходом каталогов, а не scanFiles: тот собирает только
+// файлы и намеренно не видит ни пустых папок, ни ссылок, ни узлов с именем
+// служебной папки. Служебная папка, внутри которой лежала отложенная пустая
+// ветка, проходила по такому счёту как пустая — и уезжала в rm вместе с ней.
 async function removeStageIfEmpty(stageRoot) {
-  let left;
-  try {
-    left = await scanFiles(stageRoot);
-  } catch {
-    // Заглянуть внутрь не вышло: имя занято файлом, нет прав, сеть отвалилась.
-    // Раз содержимое неизвестно — тем более не трогаем.
-    return false;
-  }
-  if (left.length > 0) return false;
+  if (!(await pruneEmptyDirs(stageRoot))) return false;
   await fsp.rm(stageRoot, { recursive: true, force: true }).catch(() => {});
   return true;
+}
+
+// Возвращает узлы служебной папки на свои места: сверху вниз и целиком.
+// Если на месте узла ничего нет, один rename возвращает всё поддерево разом —
+// это и быстрее (по сети одна операция вместо тысячи), и сохраняет пустые папки,
+// которых поштучный обход по файлам попросту не видел.
+// Место занято папкой — разбираем её содержимое по одному, вглубь.
+async function restoreTree(stageDir, dstDir, stats) {
+  let dirents;
+  try {
+    dirents = await fsp.readdir(stageDir, { withFileTypes: true });
+  } catch {
+    return; // заглянуть не вышло — оставляем как есть до следующего запуска
+  }
+  try {
+    await ensureDir(dstDir);
+  } catch {
+    return; // некуда возвращать (путь занят файлом) — пусть ждёт
+  }
+
+  await runPool(dirents, APPLY_CONCURRENCY, async (d) => {
+    const from = path.join(stageDir, d.name);
+    const to = path.join(dstDir, d.name);
+    try {
+      await fsp.rename(from, to);
+      stats.restored += 1;
+      return;
+    } catch {
+      // место занято или узел держат открытым
+    }
+    if (!d.isDirectory() || d.isSymbolicLink()) return;
+    // На месте уже стоит папка: сливаем содержимое, а опустевший каркас убираем.
+    await restoreTree(from, to, stats);
+    await fsp.rmdir(from).catch(() => {});
+  });
 }
 
 // Возвращает содержимое служебной папки приёмника обратно на свои места.
@@ -282,25 +308,10 @@ async function removeStageIfEmpty(stageRoot) {
 // Прерванный запуск считаем несостоявшимся, поэтому откатываем его целиком.
 async function restoreStage(dstRoot) {
   const stageRoot = path.join(dstRoot, STAGE_DIR);
-  const staged = await scanFiles(stageRoot);
-  if (staged.length === 0) {
-    await fsp.rm(stageRoot, { recursive: true, force: true }).catch(() => {});
-    return 0;
-  }
-  let restored = 0;
-  await runPool(staged, APPLY_CONCURRENCY, async (entry) => {
-    const back = path.join(dstRoot, entry.path);
-    try {
-      await ensureDir(path.dirname(back));
-      await fsp.rename(path.join(stageRoot, entry.path), back);
-      restored += 1;
-    } catch {
-      // файл занят или путь занят папкой — оставляем в служебной папке
-      // до следующего запуска, когда помеха может исчезнуть.
-    }
-  });
+  const stats = { restored: 0 };
+  await restoreTree(stageRoot, dstRoot, stats);
   await removeStageIfEmpty(stageRoot);
-  return restored;
+  return stats.restored;
 }
 
 // Выполняет план синхронизации из src/sync.js.
@@ -311,7 +322,10 @@ async function restoreStage(dstRoot) {
 // а откат сводится к обратному переименованию. Мусор выбрасывается одним
 // действием в самом конце, когда стало ясно, что запуск дошёл до конца.
 //
-// trashFn(absPath) — удаление (в Электроне через Корзину, на сети — напрямую).
+// trashFn(absPath, weight) — удаление (в Электроне через Корзину, на сети —
+//   напрямую). weight — сколько файлов покрывает вызов: служебная папка уезжает
+//   одним действием на всё содержимое, и вызывающему нужно знать его вес, чтобы
+//   верно посчитать, сколько ушло мимо Корзины.
 // onProgress({ done, total, action, path }) — колбэк прогресса.
 // opts.shouldStop() — если вернёт true, работа прекращается и всё откатывается.
 //
@@ -351,11 +365,20 @@ async function applyPlan(srcRoot, dstRoot, plan, trashFn, onProgress = () => {},
   };
 
   // mkdir по каждому файлу заметно тормозит на сети, поэтому помним созданное.
-  const madeDirs = new Set();
-  const ensureOnce = async (dir) => {
-    if (madeDirs.has(dir)) return;
-    await fsp.mkdir(dir, { recursive: true });
-    madeDirs.add(dir);
+  // Помним именно обещание, а не отметку о готовности: отметка ставилась после
+  // await, а файлы идут пачкой по APPLY_CONCURRENCY штук — все шестнадцать
+  // успевали проскочить проверку до того, как первый допишет ответ, и mkdir
+  // всё равно улетал на каждый файл. Кеш не срабатывал ни разу.
+  // Неудачу не запоминаем: следующий вызов должен попробовать заново.
+  const madeDirs = new Map();
+  const ensureOnce = (dir) => {
+    let pending = madeDirs.get(dir);
+    if (!pending) {
+      pending = fsp.mkdir(dir, { recursive: true });
+      madeDirs.set(dir, pending);
+      pending.catch(() => madeDirs.delete(dir));
+    }
+    return pending;
   };
 
   const stash = async (relPath) => {
@@ -393,7 +416,7 @@ async function applyPlan(srcRoot, dstRoot, plan, trashFn, onProgress = () => {},
       // Переименовать не вышло (файл занят, разные тома) — работаем как раньше:
       // копируем по новому пути, оригинал убираем в служебную папку.
       try {
-        if (await copyFile(srcRoot, dstRoot, mv.to)) {
+        if (await copyFile(srcRoot, dstRoot, mv.to, ensureOnce)) {
           journal.copy.push(mv.to);
           await stash(mv.from);
           journal.stage.push(mv.from);
@@ -413,7 +436,7 @@ async function applyPlan(srcRoot, dstRoot, plan, trashFn, onProgress = () => {},
     try {
       // false — источник исчез после сканирования. Копировать нечего, и записывать
       // в журнал тоже нечего: иначе история отчиталась бы о несуществующей копии.
-      if (await copyFile(srcRoot, dstRoot, entry.path)) journal.copy.push(entry.path);
+      if (await copyFile(srcRoot, dstRoot, entry.path, ensureOnce)) journal.copy.push(entry.path);
       else fail('copy', entry.path, { code: 'ENOENT' });
     } catch (err) {
       fail('copy', entry.path, err);
@@ -446,11 +469,14 @@ async function applyPlan(srcRoot, dstRoot, plan, trashFn, onProgress = () => {},
       // Не удалось отложить оригинал — пишем поверх, как делалось раньше.
       // Откатить такой файл будет нечем, зато синхронизация не встанет.
       parked = false;
-      unrecoverable += 1;
     }
     try {
-      if (await copyFile(srcRoot, dstRoot, entry.path)) {
+      if (await copyFile(srcRoot, dstRoot, entry.path, ensureOnce)) {
         if (parked) journal.overwrite.push(entry.path);
+        // Оригинал затёрт копией, а откат разворачивает только то, что лежит
+        // в служебной папке. Считаем потерю здесь, а не сразу после неудачного
+        // stash: если копия следом не легла, оригинал цел и терять нечего.
+        else unrecoverable += 1;
       } else {
         // Источник исчез после сканирования. Заменять нечем, поэтому возвращаем
         // отложенный оригинал: без этого он уехал бы в Корзину вместе с мусором,
@@ -555,28 +581,40 @@ async function applyPlan(srcRoot, dstRoot, plan, trashFn, onProgress = () => {},
   // Одним действием на всю папку: это на порядок быстрее, чем по файлу,
   // и в Корзине запуск лежит одной восстановимой пачкой.
   let trashed = 0;
-  const parkedCount = journal.stage.length + journal.overwrite.length + journal.conflict.length;
+  const parked = [...journal.stage, ...journal.overwrite, ...journal.conflict];
+  const parkedCount = parked.length;
   if (parkedCount > 0) {
-    try {
-      if (orphans.length === 0) {
-        await trashFn(stageRoot);
-      } else {
-        // Внутри застрял чужой оригинал: его не удалось ни заменить, ни вернуть,
-        // и другой копии у него нет. Папку целиком тут выбрасывать нельзя —
-        // убираем поимённо только то, что записано в журнале, а застрявшее
-        // остаётся дожидаться restoreStage на следующем запуске.
-        for (const rel of [...journal.stage, ...journal.overwrite, ...journal.conflict]) {
-          await trashFn(path.join(stageRoot, rel));
-        }
+    if (orphans.length === 0) {
+      try {
+        // Вес вызова передаём явно: одним действием уезжает всё содержимое
+        // папки, и без него один безвозвратно удалённый файл в отчёте выглядел
+        // бы так же, как весь запуск мимо Корзины.
+        await trashFn(stageRoot, parkedCount);
+        trashed = parkedCount;
+      } catch (err) {
+        // Выбросить не удалось — служебную папку оставляем как есть.
+        // Стереть её здесь значило бы уничтожить оригиналы молча.
+        fail('trash', STAGE_DIR, err);
       }
-      trashed = parkedCount;
-      // Убираем каркас папок, если trashFn забрал только содержимое.
-      await removeStageIfEmpty(stageRoot);
-    } catch (err) {
-      // Выбросить не удалось — служебную папку оставляем как есть.
-      // Стереть её здесь значило бы уничтожить оригиналы молча.
-      fail('trash', STAGE_DIR, err);
+    } else {
+      // Внутри застрял чужой оригинал: его не удалось ни заменить, ни вернуть,
+      // и другой копии у него нет. Папку целиком тут выбрасывать нельзя —
+      // убираем поимённо только то, что записано в журнале, а застрявшее
+      // остаётся дожидаться restoreStage на следующем запуске.
+      // Осечка на одном оригинале не отменяет уборку остальных: раньше цикл
+      // обрывался на первом же, и уже заменённые файлы возвращались на приёмник
+      // со следующим запуском — как будто их и не удаляли.
+      await runPool(parked, APPLY_CONCURRENCY, async (rel) => {
+        try {
+          await trashFn(path.join(stageRoot, rel));
+          trashed += 1;
+        } catch (err) {
+          fail('trash', rel, err);
+        }
+      });
     }
+    // Убираем каркас папок, если trashFn забрал только содержимое.
+    await removeStageIfEmpty(stageRoot);
   } else {
     // Выбрасывать нечего, но внутри мог остаться отложенный оригинал, который
     // не удалось ни заменить, ни вернуть. Такую папку не трогаем.
@@ -639,8 +677,6 @@ async function rollback(dstRoot, stageRoot, journal) {
 
 module.exports = {
   scanFiles,
-  listTopFolders,
-  listTopFolderNames,
   listChildren,
   crawlTree,
   applyPlan,

@@ -9,8 +9,6 @@ const path = require('node:path');
 
 const {
   scanFiles,
-  listTopFolders,
-  listTopFolderNames,
   listChildren,
   crawlTree,
   applyPlan,
@@ -18,7 +16,6 @@ const {
   STAGE_DIR,
 } = require('../src/fsops');
 const { planSync, detectMoves, planDirs } = require('../src/sync');
-const { pruneDescendants } = require('../src/paths');
 
 async function tmpDir() {
   return fsp.mkdtemp(path.join(os.tmpdir(), 'syncglass-'));
@@ -65,28 +62,6 @@ test('scanFiles обходит вложенные папки и пропуска
   assert.strictEqual((await scanFiles(path.join(dir, 'nope'))).length, 0);
 });
 
-test('listTopFolders считает файлы и размер по папкам', async () => {
-  const dir = await tmpDir();
-  await writeFile(dir, 'docs/a.txt', '123');
-  await writeFile(dir, 'docs/sub/b.txt', '45');
-  await writeFile(dir, 'pics/c.txt', '6789');
-  const folders = await listTopFolders(dir);
-  const byName = Object.fromEntries(folders.map((f) => [f.name, f]));
-  assert.strictEqual(byName['docs'].fileCount, 2);
-  assert.strictEqual(byName['docs'].size, 5);
-  assert.strictEqual(byName['pics'].fileCount, 1);
-  assert.strictEqual(byName['pics'].size, 4);
-});
-
-test('listTopFolderNames — только имена прямых подпапок, без рекурсии', async () => {
-  const dir = await tmpDir();
-  await writeFile(dir, 'docs/2024/a.txt', '1');
-  await writeFile(dir, 'pics/b.txt', '2');
-  await writeFile(dir, 'root.txt', '3'); // файл в корне не считается папкой
-  const names = await listTopFolderNames(dir);
-  assert.deepStrictEqual(names, ['docs', 'pics']);
-});
-
 test('синхронизация вложенной ветки не трогает соседей', async () => {
   const src = await tmpDir();
   const dst = await tmpDir();
@@ -100,10 +75,8 @@ test('синхронизация вложенной ветки не трогае
   await writeFile(dst, 'pics/photo.txt', 'DST-pic-different'); // сосед, НЕ выбран
 
   // Пользователь выбрал только docs/2024.
-  const branches = pruneDescendants(['docs/2024']);
-  assert.deepStrictEqual(branches, ['docs/2024']);
-
-  for (const folder of branches) {
+  // Пользователь выбрал только docs/2024.
+  for (const folder of ['docs/2024']) {
     const [s, d] = [
       await scanFiles(path.join(src, folder)),
       await scanFiles(path.join(dst, folder)),
@@ -461,7 +434,6 @@ test('служебная папка не видна обходам и не по�
   assert.deepStrictEqual(files.map((f) => f.path), ['обычный.txt']);
   assert.deepStrictEqual(dirs, []);
   assert.deepStrictEqual((await listChildren(dir)).map((c) => c.name), ['обычный.txt']);
-  assert.deepStrictEqual(await listTopFolderNames(dir), []);
 });
 
 // ---- Источник исчезает между планом и применением ----
@@ -551,5 +523,129 @@ test('restoreStage не уничтожает оригиналы, которые 
     await fsp.readFile(path.join(stage, 'застрял.txt'), 'utf8'),
     'второй',
     'служебную папку нельзя сносить, пока внутри лежат чьи-то данные'
+  );
+});
+
+// ---- Служебная папка: пустые ветки и подсчёт содержимого ----
+// Возврат шёл по файлам, а «пусто ли внутри» считалось тем же обходом. Пустых
+// папок он не видит: отложенная пустая ветка не возвращалась, а служебная папка
+// следом проходила как пустая и уезжала в rm вместе с ней.
+
+test('restoreStage возвращает пустые папки, а не только файлы', async () => {
+  const dst = await tmpDir();
+  const stage = path.join(dst, STAGE_DIR);
+  await writeFile(dst, `${STAGE_DIR}/ветка/файл.txt`, 'данные');
+  await fsp.mkdir(path.join(stage, 'ветка', 'пустая'), { recursive: true });
+
+  await restoreStage(dst);
+
+  assert.ok(fs.existsSync(path.join(dst, 'ветка', 'файл.txt')));
+  assert.ok(
+    fs.existsSync(path.join(dst, 'ветка', 'пустая')),
+    'пустая папка — тоже содержимое, её нельзя терять при возврате'
+  );
+  assert.ok(!fs.existsSync(stage));
+});
+
+test('restoreStage возвращает ветку, в которой нет ни одного файла', async () => {
+  const dst = await tmpDir();
+  await fsp.mkdir(path.join(dst, STAGE_DIR, 'только-папки', 'глубже'), { recursive: true });
+
+  await restoreStage(dst);
+
+  assert.ok(
+    fs.existsSync(path.join(dst, 'только-папки', 'глубже')),
+    'ветка без файлов считалась пустой служебной папкой и стиралась целиком'
+  );
+  assert.ok(!fs.existsSync(path.join(dst, STAGE_DIR)));
+});
+
+test('restoreStage сливает содержимое, когда место занято папкой', async () => {
+  const dst = await tmpDir();
+  await writeFile(dst, `${STAGE_DIR}/общая/из-служебной.txt`, 'вернуть');
+  await writeFile(dst, 'общая/на-месте.txt', 'уже тут');
+
+  await restoreStage(dst);
+
+  assert.ok(fs.existsSync(path.join(dst, 'общая', 'из-служебной.txt')));
+  assert.ok(fs.existsSync(path.join(dst, 'общая', 'на-месте.txt')));
+  assert.ok(!fs.existsSync(path.join(dst, STAGE_DIR)));
+});
+
+// ---- mkdir не должен уходить на каждый файл ----
+// Кеш созданных папок помечал готовность после await, поэтому вся пачка
+// параллельных копий успевала проскочить проверку — по сети это лишние
+// обращения на каждый файл ветки.
+
+test('копирование пачки файлов в одну папку не гонит mkdir на каждый', async () => {
+  const src = await tmpDir();
+  const dst = await tmpDir();
+  for (let i = 0; i < 12; i += 1) await writeFile(src, `ветка/ф${i}.txt`, `${i}`);
+
+  const plan = planSync(await scanFiles(src), []);
+  const real = fsp.mkdir;
+  let calls = 0;
+  fsp.mkdir = (...args) => {
+    calls += 1;
+    return real.apply(fsp, args);
+  };
+  try {
+    await applyPlan(src, dst, plan, mockTrash([]));
+  } finally {
+    fsp.mkdir = real;
+  }
+
+  assert.ok(calls <= 3, `mkdir вызван ${calls} раз на 12 файлов в одной папке`);
+  assert.strictEqual((await scanFiles(dst)).length, 12);
+});
+
+// ---- Уборка отложенного, когда часть оригиналов застряла ----
+
+test('Корзина отказала — оригиналы остаются в служебной папке, а не пропадают', async () => {
+  const src = await tmpDir();
+  const dst = await tmpDir();
+  await writeFile(src, 'общий.txt', 'останется');
+  for (const n of ['a', 'b', 'c']) await writeFile(dst, `лишний-${n}.txt`, 'убрать');
+  await writeFile(dst, 'общий.txt', 'останется');
+
+  const plan = planSync(await scanFiles(src), await scanFiles(dst));
+  const refuse = async () => {
+    throw Object.assign(new Error('занято'), { code: 'EBUSY' });
+  };
+
+  const res = await applyPlan(src, dst, plan, refuse);
+
+  assert.strictEqual(res.failures.length, 1, 'об отказе сообщаем ровно один раз');
+  assert.strictEqual(res.trashed, 0, 'ничего не выброшено — так и отчитываемся');
+  const left = await scanFiles(path.join(dst, STAGE_DIR));
+  assert.strictEqual(
+    left.length,
+    3,
+    'единственная копия удаляемых файлов дожидается следующего запуска'
+  );
+  assert.strictEqual(
+    (await restoreStage(dst)) > 0,
+    true,
+    'и следующий запуск возвращает их на место'
+  );
+  assert.ok(fs.existsSync(path.join(dst, 'лишний-a.txt')));
+});
+
+test('вес вызова Корзины равен числу файлов в служебной папке', async () => {
+  const src = await tmpDir();
+  const dst = await tmpDir();
+  for (const n of ['a', 'b', 'c']) await writeFile(dst, `лишний-${n}.txt`, 'убрать');
+
+  const plan = planSync(await scanFiles(src), await scanFiles(dst));
+  let weight = null;
+  await applyPlan(src, dst, plan, async (abs, w) => {
+    weight = w;
+    await fsp.rm(abs, { recursive: true, force: true });
+  });
+
+  assert.strictEqual(
+    weight,
+    3,
+    'служебная папка уезжает одним действием — вызывающий должен знать его вес'
   );
 });

@@ -29,6 +29,17 @@ function cacheKey(absFolderPath, excludes) {
   return absFolderPath + '\0' + [...excludes].sort().join('\0');
 }
 
+// Выбрасывает записи, которым по возрасту всё равно уже нельзя верить.
+// Просроченную запись перезаписывает только повторный запрос ровно того же
+// ключа, а ключ — это путь ветки плюс исключения: за долгую сессию их набирается
+// сколько угодно разных, и ни одна не освобождалась. Скан большой ветки держит
+// запись на каждый файл, так что копилось это гигабайтами.
+function pruneScanCache(now) {
+  for (const [key, scan] of scanCache) {
+    if (now - scan.at >= SCAN_TTL_MS) scanCache.delete(key);
+  }
+}
+
 // Возвращает { files, dirs } — оба списка относительно absFolderPath.
 async function getScan(absFolderPath, excludes = null, onFile = null) {
   const key = cacheKey(absFolderPath, excludes);
@@ -36,9 +47,10 @@ async function getScan(absFolderPath, excludes = null, onFile = null) {
   if (hit && Date.now() - hit.at < SCAN_TTL_MS) return hit;
   const dirs = [];
   const files = await scanFiles(absFolderPath, '', [], excludes, onFile, null, dirs);
-  const scan = { files, dirs, at: Date.now() };
-  scanCache.set(key, scan);
-  return scan;
+  const now = Date.now();
+  pruneScanCache(now);
+  scanCache.set(key, { files, dirs, at: now });
+  return scanCache.get(key);
 }
 
 // Из общего списка исключений берёт те, что лежат внутри ветки folder,
@@ -242,6 +254,12 @@ function createWindow() {
     },
   });
 
+  // Без этого ссылка переживает само окно, и обработчик второго экземпляра
+  // дёргает уничтоженный объект — Электрон отвечает на это исключением.
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+  });
+
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 }
 
@@ -253,7 +271,7 @@ if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
   app.on('second-instance', () => {
-    if (!mainWindow) return;
+    if (!mainWindow || mainWindow.isDestroyed()) return;
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.focus();
   });
@@ -441,23 +459,38 @@ ipcMain.handle('start-crawl', async (event, { localPath, networkPath, noLimit = 
   // Периодически сбрасываем накопленное на диск, чтобы прогресс не терялся.
   // Сериализация всего индекса блокирует поток, поэтому чем больше индекс —
   // тем реже сохраняем (5 c для мелких деревьев … до 40 c для сотен тысяч).
+  // Сохраняет кеш, только если этот обход всё ещё текущий. Погашенный обход
+  // дописывал свой черновик уже после того, как пришедший ему на смену успевал
+  // сохранить полный: на диске оставалась половина дерева, и следующий запуск
+  // показывал её как готовые размеры.
+  const saveIfCurrent = () => {
+    if (token !== crawlToken) return Promise.resolve();
+    return saveSizeCache(localPath, networkPath, [...index.values()]);
+  };
+
   const maybeSave = () => {
     const interval = Math.min(40000, Math.max(5000, index.size / 8));
     if (saving || Date.now() - lastSave < interval) return;
     saving = true;
     lastSave = Date.now();
-    saveSizeCache(localPath, networkPath, [...index.values()]).finally(() => {
+    saveIfCurrent().finally(() => {
       saving = false;
     });
   };
 
+  // Ключ — путь без учёта регистра. Стороны могут писать одну и ту же папку
+  // по-разному ('Док' против 'док'), а строка в дереве одна: при точном ключе
+  // размеры расходились по двум записям, и та, чьё написание в дерево не попало,
+  // не показывалась вовсе — рядом с именем висела пустота вместо размера.
+  // Первое написание сохраняем: по нему renderer и находит строку.
   const put = (rel, sideKey, cntKey, size, cnt) => {
     if (token !== crawlToken) throw new Error('aborted');
     if (!noLimit && scanned >= MAX_CRAWL) throw new Error('toobig');
-    let e = index.get(rel);
+    const key = ciKey(rel);
+    let e = index.get(key);
     if (!e) {
       e = { relPath: rel, sizeLocal: null, cntLocal: null, sizeNetwork: null, cntNetwork: null };
-      index.set(rel, e);
+      index.set(key, e);
     }
     e[sideKey] = size;
     e[cntKey] = cnt;
@@ -491,8 +524,7 @@ ipcMain.handle('start-crawl', async (event, { localPath, networkPath, noLimit = 
     }
     flush();
     if (token !== crawlToken) return { ok: false, aborted: true };
-    await saveSizeCache(localPath, networkPath, [...index.values()]);
-    if (activeCrawl && activeCrawl.index === index) activeCrawl = null;
+    await saveIfCurrent();
     // Синхронизация, прошедшая за время обхода, обнуляет crawlData: приёмник
     // изменился, и собранный индекс описывает уже не то дерево. Тогда отмечать
     // нечего — план пересканирует стороны заново.
@@ -503,16 +535,21 @@ ipcMain.handle('start-crawl', async (event, { localPath, networkPath, noLimit = 
     post('crawl-done', { scanned, ok: true, partial: !trusted });
     return { ok: true, scanned, partial: !trusted };
   } catch (err) {
-    // Сохраняем частичный прогресс даже при обрыве обхода.
-    await saveSizeCache(localPath, networkPath, [...index.values()]);
+    // Сохраняем частичный прогресс даже при обрыве обхода — но только если
+    // обход всё ещё наш: погашенному тут писать уже нечего, его место занял новый.
+    await saveIfCurrent();
     if (err.message === 'aborted') return { ok: false, aborted: true };
     if (err.message === 'toobig') {
-      if (activeCrawl && activeCrawl.index === index) activeCrawl = null;
       post('crawl-done', { scanned, ok: false, toobig: true });
       return { ok: false, toobig: true };
     }
     post('crawl-done', { scanned, ok: false, error: err.message });
     return { ok: false, error: err.message };
+  } finally {
+    // Ссылку на индекс снимаем всегда. Раньше её сбрасывал только удачный исход,
+    // и после обрыва она держала оборванный черновик: закрытие окна сохраняло
+    // на диск его, затирая полный кеш от следующего, уже удавшегося обхода.
+    if (activeCrawl && activeCrawl.index === index) activeCrawl = null;
   }
 });
 
@@ -596,7 +633,11 @@ ipcMain.handle('sync', async (event, { localPath, networkPath, folders, excludes
   // На сетевых (UNC) путях Корзины нет — там удаляем напрямую.
   // На локальных пытаемся в Корзину, при сбое (папка занята и т.п.) — тоже напрямую.
   const dstTrashable = supportsTrash(dstRoot);
-  let permanent = false;
+  // Считаем именно файлы, ушедшие мимо Корзины, а не «был ли такой случай».
+  // Раньше здесь стоял флаг, и один-единственный файл, который не приняла
+  // Корзина, окрашивал весь запуск: отчёт объявлял безвозвратно удалённым
+  // всё, что вообще было удалено.
+  let permanentDeletes = 0;
   const rmForce = async (absPath) => {
     try {
       await fsp.rm(absPath, { recursive: true, force: true });
@@ -609,7 +650,9 @@ ipcMain.handle('sync', async (event, { localPath, networkPath, folders, excludes
       }
     }
   };
-  const trashFn = async (absPath) => {
+  // weight — сколько файлов покрывает вызов: служебная папка уезжает одним
+  // действием на всё содержимое сразу.
+  const trashFn = async (absPath, weight = 1) => {
     if (dstTrashable) {
       try {
         await shell.trashItem(absPath);
@@ -619,7 +662,7 @@ ipcMain.handle('sync', async (event, { localPath, networkPath, folders, excludes
       }
     }
     await rmForce(absPath);
-    permanent = true;
+    permanentDeletes += weight;
   };
 
   // Прошлый запуск мог оборваться на полпути (вылет, обрыв сети). Тогда в служебной
@@ -741,7 +784,7 @@ ipcMain.handle('sync', async (event, { localPath, networkPath, folders, excludes
         trash: totals.trash,
         dirs: totals.dirs,
       },
-      permanentDeletes: permanent ? res.trashed : 0,
+      permanentDeletes,
       failures: res.failures.length,
       files,
       filesTruncated: allEntries.length - files.length,
@@ -751,7 +794,7 @@ ipcMain.handle('sync', async (event, { localPath, networkPath, folders, excludes
   return {
     done: res.done,
     total: res.total,
-    permanentDeletes: permanent ? res.trashed : 0,
+    permanentDeletes,
     unrecoverable: res.unrecoverable,
     failures: res.failures.length,
     failuresSample: res.failures.slice(0, 5).map((f) => `${f.path} (${f.code})`),

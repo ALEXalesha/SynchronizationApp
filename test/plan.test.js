@@ -515,3 +515,20 @@ test('scanFromIndex находит ветку независимо от реги
   assert.deepStrictEqual(got.files.map((e) => e.path), ['а.txt']);
   assert.deepStrictEqual(got.dirs, []);
 });
+
+// Папки-родители выбранной ветки план создаёт, но внутрь ветки они не вложены.
+// В шапке предпросмотра они были, в строке по ветке — нет, и сумма по строкам
+// не сходилась с итогом.
+test('счётчик ветки учитывает её собственных родителей', async () => {
+  const src = await tmpDir();
+  const dst = await tmpDir();
+  await writeFile(src, 'год/квартал/неделя/отчёт.txt', 'данные');
+
+  const plan = await buildRunPlan(src, dst, ['год/квартал/неделя'], [], liveScan);
+  const totals = summarize(plan);
+  const [row] = countByFolder(plan, ['год/квартал/неделя']);
+
+  assert.deepStrictEqual(plan.dirs.create, ['год', 'год/квартал', 'год/квартал/неделя']);
+  assert.strictEqual(row.summary.dirs, totals.dirs);
+  assert.strictEqual(row.summary.total, totals.total);
+});

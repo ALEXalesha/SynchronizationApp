@@ -6,9 +6,10 @@ const state = {
   networkPath: '',
   direction: 'toNetwork', // 'toNetwork' | 'toLocal'
   roots: [], // дерево узлов верхнего уровня
-  marks: new Map(), // relPath -> 'include' | 'exclude' (только неизбыточные метки)
+  // ключ(relPath) -> { path, mark: 'include' | 'exclude' } (только неизбыточные метки)
+  marks: new Map(),
   expanded: new Set(), // relPath развёрнутых узлов
-  sizeMap: new Map(), // relPath -> { sizeLocal, cntLocal, sizeNetwork, cntNetwork }
+  sizeMap: new Map(), // ключ(relPath) -> { sizeLocal, cntLocal, sizeNetwork, cntNetwork }
   scanGen: 0,
   localOk: null, // доступность папок (постоянная проверка)
   networkOk: null,
@@ -103,23 +104,31 @@ function setStatus(kind, text, summary = '') {
 }
 
 // ---- Модель выбора (трёхпозиционная) ----
+// Ключ отметки — путь без учёта регистра, как и всюду в главном процессе.
+// Имя узла в дереве берётся с той стороны, что попала в список первой, и стоит
+// второй написать его иначе ('Отчёты' против 'отчёты'), как точный ключ переставал
+// совпадать: галочка с папки пропадала сама собой, а вместе с ней и папка из
+// синхронизации. Хранится при этом настоящее написание — его и отправляем дальше.
+function markKey(relPath) {
+  return relPath.toLowerCase();
+}
 function inheritedIncluded(relPath) {
   const parts = relPath.split('/');
   for (let i = parts.length - 1; i >= 1; i--) {
-    const anc = parts.slice(0, i).join('/');
-    const m = state.marks.get(anc);
-    if (m) return m === 'include';
+    const m = state.marks.get(markKey(parts.slice(0, i).join('/')));
+    if (m) return m.mark === 'include';
   }
   return false;
 }
 function isIncluded(relPath) {
-  const m = state.marks.get(relPath);
-  if (m) return m === 'include';
+  const m = state.marks.get(markKey(relPath));
+  if (m) return m.mark === 'include';
   return inheritedIncluded(relPath);
 }
 function hasDescendantMark(relPath) {
+  const prefix = markKey(relPath) + '/';
   for (const k of state.marks.keys()) {
-    if (k.startsWith(relPath + '/')) return true;
+    if (k.startsWith(prefix)) return true;
   }
   return false;
 }
@@ -261,14 +270,18 @@ function pruneMarks({ localOk, networkOk }) {
   if (state.localPath && !localOk) return;
   if (state.networkPath && !networkOk) return;
 
-  const byLower = new Map(state.roots.map((n) => [n.relPath.toLowerCase(), n.relPath]));
+  const byLower = new Map(state.roots.map((n) => [markKey(n.relPath), n.relPath]));
   const kept = new Map();
-  for (const [key, mark] of state.marks) {
-    const slash = key.indexOf('/');
-    const head = slash < 0 ? key : key.slice(0, slash);
-    const actual = byLower.get(head.toLowerCase());
+  for (const entry of state.marks.values()) {
+    // Режем по настоящему пути, а не по ключу: приведение регистра у отдельных
+    // букв меняет длину строки, и отрезанное по ключу «начало» пришлось бы
+    // не на границу сегмента.
+    const slash = entry.path.indexOf('/');
+    const head = slash < 0 ? entry.path : entry.path.slice(0, slash);
+    const actual = byLower.get(markKey(head));
     if (!actual) continue; // папки больше нет — отметку тоже убираем
-    kept.set(actual + key.slice(head.length), mark);
+    const relPath = actual + entry.path.slice(head.length);
+    kept.set(markKey(relPath), { path: relPath, mark: entry.mark });
   }
   state.marks = kept;
 }
@@ -355,14 +368,16 @@ async function toggleExpand(node) {
 // ---- Отметка (клик переключает включённость целиком; работает и для файлов) ----
 function toggleCheck(node) {
   const rel = node.relPath;
+  const key = markKey(rel);
   const want = !isIncluded(rel);
   const inherited = inheritedIncluded(rel);
 
+  const prefix = key + '/';
   for (const k of [...state.marks.keys()]) {
-    if (k !== rel && k.startsWith(rel + '/')) state.marks.delete(k);
+    if (k !== key && k.startsWith(prefix)) state.marks.delete(k);
   }
-  if (want === inherited) state.marks.delete(rel);
-  else state.marks.set(rel, want ? 'include' : 'exclude');
+  if (want === inherited) state.marks.delete(key);
+  else state.marks.set(key, { path: rel, mark: want ? 'include' : 'exclude' });
   renderTree();
 }
 
@@ -434,7 +449,7 @@ function appendPlaceholder(text, depth) {
 function metaFor(node, side) {
   const present = side === 'local' ? node.hasLocal : node.hasNetwork;
   if (!present) return { text: side === 'local' ? 'нет локально' : 'нет в сети', dim: true };
-  const s = state.sizeMap.get(node.relPath);
+  const s = state.sizeMap.get(markKey(node.relPath));
   if (!s) return { text: '', dim: true };
   const size = side === 'local' ? s.sizeLocal : s.sizeNetwork;
   const cnt = side === 'local' ? s.cntLocal : s.cntNetwork;
@@ -504,7 +519,7 @@ function buildRow(node, depth, side) {
 function onSelectAll(e) {
   state.marks.clear();
   if (e.target.checked) {
-    state.roots.forEach((n) => state.marks.set(n.relPath, 'include'));
+    state.roots.forEach((n) => state.marks.set(markKey(n.relPath), { path: n.relPath, mark: 'include' }));
   }
   renderTree();
 }
@@ -514,7 +529,11 @@ function updateControls() {
   const { folders, excludes } = collectSelection();
   const exNote = excludes.length ? `, исключено: ${excludes.length}` : '';
   const allChecked =
-    state.roots.length > 0 && state.roots.every((n) => state.marks.get(n.relPath) === 'include');
+    state.roots.length > 0 &&
+    state.roots.every((n) => {
+      const m = state.marks.get(markKey(n.relPath));
+      return !!m && m.mark === 'include';
+    });
 
   for (const head of el.heads) {
     head.querySelector('.selected-count').textContent = `выбрано: ${folders.length}${exNote}`;
@@ -528,9 +547,9 @@ function updateControls() {
 function collectSelection() {
   const folders = [];
   const excludes = [];
-  for (const [rel, mark] of state.marks) {
-    if (mark === 'include') folders.push(rel);
-    else excludes.push(rel);
+  for (const entry of state.marks.values()) {
+    if (entry.mark === 'include') folders.push(entry.path);
+    else excludes.push(entry.path);
   }
   return { folders, excludes };
 }
@@ -546,10 +565,16 @@ function scheduleSizeRender() {
     renderTree();
   }, 400);
 }
+// Ключ — тот же, что у отметок: без учёта регистра. Обход присылает путь
+// с той стороны, что встретилась первой, а строка в дереве может быть подписана
+// написанием другой — при точном ключе размер к ней просто не находился.
+// На диске от прежних версий лежит кеш со старыми ключами: приведение здесь
+// разбирает и его, поэтому отдельная миграция не нужна.
 function mergeSizes(entries) {
   for (const e of entries) {
+    const key = markKey(e.relPath);
     const cur =
-      state.sizeMap.get(e.relPath) ||
+      state.sizeMap.get(key) ||
       { sizeLocal: null, cntLocal: null, sizeNetwork: null, cntNetwork: null };
     if (e.sizeLocal != null) {
       cur.sizeLocal = e.sizeLocal;
@@ -559,7 +584,7 @@ function mergeSizes(entries) {
       cur.sizeNetwork = e.sizeNetwork;
       cur.cntNetwork = e.cntNetwork;
     }
-    state.sizeMap.set(e.relPath, cur);
+    state.sizeMap.set(key, cur);
   }
   scheduleSizeRender();
 }
@@ -781,8 +806,11 @@ async function runSync() {
     } else if (res && res.cancelled) {
       el.progressFill.style.width = '0%';
       el.progressText.textContent = 'Остановлено, всё возвращено как было';
+      // Сюда попадают файлы, которые не удалось отложить в служебную папку:
+      // удалённые ушли сразу в Корзину, а перезаписанные затёрты копией с источника,
+      // и в Корзине их нет вовсе. Обещать одну Корзину на оба случая нельзя.
       const lost = res.unrecoverable
-        ? `<div class="preview-warn">⚠ ${res.unrecoverable} файлов вернуть не удалось: их пришлось обработать напрямую (слишком длинный путь). Ищите их в Корзине приёмника.</div>`
+        ? `<div class="preview-warn">⚠ ${res.unrecoverable} файлов вернуть не удалось: их пришлось обработать напрямую (обычно слишком длинный путь). Удалённые ищите в Корзине приёмника; перезаписанные заменены версией с источника.</div>`
         : '';
       el.previewSummary.innerHTML =
         '<div class="preview-note">Синхронизация прервана. Скопированное удалено, перезаписанное и удалённое возвращено на место.</div>' + lost;

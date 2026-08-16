@@ -132,6 +132,24 @@ function detectMoves(plan) {
   return { ...plan, moves, copy: rest.added, trash: rest.gone };
 }
 
+// Убирает повторы без учёта регистра, сохраняя первое написание.
+// Одна и та же папка приходит сюда из разных выбранных веток (для 'a/b/c'
+// в список попадают и родители 'a', 'a/b'), а стороны могут писать её имя
+// по-разному. Точный Set считал 'Docs' и 'docs' за две разные папки: mkdir
+// уходил дважды, предпросмотр обещал лишнюю работу, а откат пытался снести
+// одну и ту же папку два раза.
+function uniqueDirs(dirs) {
+  const seen = new Set();
+  const out = [];
+  for (const d of dirs) {
+    const k = ciKey(d);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(d);
+  }
+  return out;
+}
+
 // Какие папки создать на приёмнике и какие с него убрать, чтобы структура совпала.
 // Удаление идёт от глубоких к мелким, поэтому обратная сортировка.
 // Сравнение без учёта регистра: иначе папка 'Docs' на приёмнике считалась лишней
@@ -140,8 +158,8 @@ function planDirs(srcDirs, dstDirs) {
   const src = new Set(srcDirs.map(ciKey));
   const dst = new Set(dstDirs.map(ciKey));
   return {
-    create: [...new Set(srcDirs)].filter((d) => !dst.has(ciKey(d))).sort(),
-    remove: [...new Set(dstDirs)].filter((d) => !src.has(ciKey(d))).sort().reverse(),
+    create: uniqueDirs(srcDirs).filter((d) => !dst.has(ciKey(d))).sort(),
+    remove: uniqueDirs(dstDirs).filter((d) => !src.has(ciKey(d))).sort().reverse(),
   };
 }
 

@@ -27,17 +27,10 @@ function rootsOverlap(srcRoot, dstRoot) {
   return isInside(srcRoot, dstRoot) || isInside(dstRoot, srcRoot);
 }
 
-// Из набора выбранных путей папок убирает те, что вложены в другой выбранный путь.
-// Если выбраны и 'docs', и 'docs/2024' — синхронизация 'docs' уже покрывает вложенное,
-// поэтому оставляем только 'docs'. Пути с разделителем '/'.
-function pruneDescendants(paths) {
-  const sorted = [...new Set(paths)].sort();
-  const result = [];
-  for (const p of sorted) {
-    const covered = result.some((r) => p === r || p.startsWith(r + '/'));
-    if (!covered) result.push(p);
-  }
-  return result;
-}
+// Свёртки вложенных выбранных путей здесь намеренно нет. Вложенная ветка рядом
+// с родителем — не избыточность, а законный выбор: снять отметку с 'docs/a',
+// а потом вернуть её вложенной части 'docs/a/b' значит выбрать и 'docs',
+// и 'docs/a/b' при исключённом 'docs/a'. Отбрось мы вложенное как покрытое
+// родителем — эта ветка молча выпала бы из синхронизации.
 
-module.exports = { pruneDescendants, isInside, rootsOverlap, ciKey };
+module.exports = { isInside, rootsOverlap, ciKey };
