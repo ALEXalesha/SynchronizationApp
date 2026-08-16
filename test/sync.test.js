@@ -114,3 +114,30 @@ test('summarize учитывает перемещения и папки в total
   assert.strictEqual(s.dirs, 2);
   assert.strictEqual(s.total, 3);
 });
+
+// ---- Регистр в путях ----
+// NTFS и сетевые шары не различают 'Note.txt' и 'note.txt'. Пока сравнение шло
+// через ===, один файл выглядел двумя: копия ложилась поверх приёмника, а следом
+// исходное написание уезжало в Корзину — и файл пропадал с приёмника совсем.
+
+test('путь отличается только регистром — это один файл, а не копия плюс удаление', () => {
+  const plan = planSync([f('док/Заметка.txt', 10, 1000)], [f('док/заметка.txt', 10, 1000)]);
+  assert.strictEqual(plan.copy.length, 0);
+  assert.strictEqual(plan.trash.length, 0);
+  // Перезапись, а не «без изменений»: она начинается с переноса оригинала
+  // в служебную папку, поэтому на месте остаётся написание источника.
+  assert.strictEqual(plan.overwrite.length, 1);
+  assert.strictEqual(plan.overwrite[0].path, 'док/Заметка.txt');
+});
+
+test('одинаковое написание и содержимое — по-прежнему без изменений', () => {
+  const plan = planSync([f('a.txt', 10, 1000)], [f('a.txt', 10, 1000)]);
+  assert.strictEqual(plan.unchanged.length, 1);
+  assert.strictEqual(plan.overwrite.length, 0);
+});
+
+test('planDirs не сносит папку приёмника, написанную в другом регистре', () => {
+  const { create, remove } = planDirs(['Док', 'Док/год'], ['док', 'док/год', 'лишняя']);
+  assert.deepStrictEqual(create, []);
+  assert.deepStrictEqual(remove, ['лишняя']);
+});

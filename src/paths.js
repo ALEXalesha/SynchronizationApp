@@ -2,6 +2,16 @@
 
 const path = require('path');
 
+// Ключ для сравнения путей двух сторон. Регистр не значим: NTFS и сетевые шары
+// не различают 'Docs' и 'docs', поэтому сравнение через === выдавало один и тот же
+// файл за два разных. Приёмник получал копию поверх своего же файла, а следом
+// исходное имя уезжало в Корзину — и файл пропадал с приёмника целиком.
+// toLowerCase, а не toLocaleLowerCase: локаль пользователя не должна влиять
+// на то, совпали пути или нет.
+function ciKey(p) {
+  return p.toLowerCase();
+}
+
 // Лежит ли inner внутри outer (или это тот же путь).
 // Регистр не важен: на Windows пути к нему нечувствительны.
 function isInside(inner, outer) {
@@ -30,4 +40,4 @@ function pruneDescendants(paths) {
   return result;
 }
 
-module.exports = { pruneDescendants, isInside, rootsOverlap };
+module.exports = { pruneDescendants, isInside, rootsOverlap, ciKey };

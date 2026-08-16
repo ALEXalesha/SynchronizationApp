@@ -7,13 +7,17 @@
 //   { path: 'sub/dir/file.txt', size: 123, mtimeMs: 1719900000000 }
 // path — путь относительно корня выбранной папки, разделитель '/'.
 
+const { ciKey } = require('./paths');
+
 // Порог различия времени в миллисекундах. Разные файловые системы (NTFS, сеть)
 // округляют mtime по-разному, поэтому небольшую дельту считаем «одинаковым».
 const MTIME_TOLERANCE_MS = 2000;
 
+// Индекс по пути без учёта регистра: стороны сравниваются так же, как их
+// сравнивает сама файловая система.
 function indexByPath(entries) {
   const map = new Map();
-  for (const e of entries) map.set(e.path, e);
+  for (const e of entries) map.set(ciKey(e.path), e);
   return map;
 }
 
@@ -40,10 +44,14 @@ function planSync(sourceEntries, destEntries) {
   const unchanged = [];
 
   for (const src of sourceEntries) {
-    const dst = dstIndex.get(src.path);
+    const dst = dstIndex.get(ciKey(src.path));
     if (!dst) {
       copy.push(src);
-    } else if (isChanged(src, dst)) {
+    } else if (src.path !== dst.path || isChanged(src, dst)) {
+      // Пути совпали, но написаны по-разному ('Note.txt' против 'note.txt') —
+      // перезаписываем даже при одинаковом содержимом. Перезапись начинается
+      // с переноса оригинала в служебную папку, поэтому на месте остаётся файл
+      // с именем источника, а не старое написание.
       overwrite.push(src);
     } else {
       unchanged.push(src);
@@ -51,7 +59,7 @@ function planSync(sourceEntries, destEntries) {
   }
 
   for (const dst of destEntries) {
-    if (!srcIndex.has(dst.path)) trash.push(dst);
+    if (!srcIndex.has(ciKey(dst.path))) trash.push(dst);
   }
 
   return { copy, overwrite, trash, unchanged };
@@ -66,7 +74,7 @@ function baseName(relPath) {
 // и FAT округляют её по-своему, и точное совпадение до миллисекунды по сети
 // не срабатывает. Дату проверяем отдельно, с тем же допуском, что и везде.
 function keyByName(entry) {
-  return `${entry.size}:${baseName(entry.path)}`;
+  return `${entry.size}:${ciKey(baseName(entry.path))}`;
 }
 
 function groupBy(entries, keyOf) {
@@ -126,12 +134,14 @@ function detectMoves(plan) {
 
 // Какие папки создать на приёмнике и какие с него убрать, чтобы структура совпала.
 // Удаление идёт от глубоких к мелким, поэтому обратная сортировка.
+// Сравнение без учёта регистра: иначе папка 'Docs' на приёмнике считалась лишней
+// рядом с 'docs' на источнике, и её сносило rmdir сразу после создания.
 function planDirs(srcDirs, dstDirs) {
-  const src = new Set(srcDirs);
-  const dst = new Set(dstDirs);
+  const src = new Set(srcDirs.map(ciKey));
+  const dst = new Set(dstDirs.map(ciKey));
   return {
-    create: [...new Set(srcDirs)].filter((d) => !dst.has(d)).sort(),
-    remove: [...new Set(dstDirs)].filter((d) => !src.has(d)).sort().reverse(),
+    create: [...new Set(srcDirs)].filter((d) => !dst.has(ciKey(d))).sort(),
+    remove: [...new Set(dstDirs)].filter((d) => !src.has(ciKey(d))).sort().reverse(),
   };
 }
 

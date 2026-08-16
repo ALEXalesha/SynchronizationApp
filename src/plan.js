@@ -4,6 +4,7 @@ const path = require('path');
 const fsp = require('fs').promises;
 
 const { planSync, detectMoves, planDirs } = require('./sync');
+const { ciKey } = require('./paths');
 
 // Тип узла на стороне root: 'dir' | 'file' | 'missing'.
 async function statType(root, rel) {
@@ -93,7 +94,11 @@ async function planForBranch(srcRoot, dstRoot, branch, excludes, scan) {
   // такого узла, из плана вычёркиваем: к моменту удаления по одному его уже нет.
   // Результат скана при этом не трогаем — он лежит в кеше и переживёт нас.
   const inner = findTypeConflicts(src, dst);
-  const covered = (rel) => inner.some((c) => rel === c || rel.startsWith(c + '/'));
+  const innerKeys = inner.map(ciKey);
+  const covered = (rel) => {
+    const k = ciKey(rel);
+    return innerKeys.some((c) => k === c || k.startsWith(c + '/'));
+  };
   const dstFiles = inner.length ? dst.files.filter((e) => !covered(e.path)) : dst.files;
   const dstDirs = inner.length ? dst.dirs.filter((d) => !covered(d)) : dst.dirs;
   appendAll(conflicts, inner.map(under));
@@ -122,10 +127,10 @@ async function planForBranch(srcRoot, dstRoot, branch, excludes, scan) {
 function findTypeConflicts(src, dst) {
   const out = [];
   if (src.files.length === 0 && src.dirs.length === 0) return out;
-  const dstFileSet = new Set(dst.files.map((e) => e.path));
-  const dstDirSet = new Set(dst.dirs);
-  for (const d of src.dirs) if (dstFileSet.has(d)) out.push(d);
-  for (const e of src.files) if (dstDirSet.has(e.path)) out.push(e.path);
+  const dstFileSet = new Set(dst.files.map((e) => ciKey(e.path)));
+  const dstDirSet = new Set(dst.dirs.map(ciKey));
+  for (const d of src.dirs) if (dstFileSet.has(ciKey(d))) out.push(d);
+  for (const e of src.files) if (dstDirSet.has(ciKey(e.path))) out.push(e.path);
   return out;
 }
 
@@ -141,19 +146,37 @@ function findTypeConflicts(src, dst) {
 // и выбрасывал всю вложенную ветку целиком — молча, без единой ошибки, и только
 // когда фоновый обход успел досчитаться. Один и тот же выбор давал разный
 // результат в зависимости от того, включены ли размеры.
+//
+// Регистр в сравнении не участвует. Ветку интерфейс берёт из общего списка обеих
+// сторон, а имя в нём — с той стороны, что попала в список первой. Если вторая
+// пишет ту же папку иначе ('Docs' против 'docs'), точное сравнение не находило
+// в индексе ни одного пути: сторона читалась пустой. Пустой источник означает
+// «на приёмнике всё лишнее», и план предлагал стереть ветку целиком.
 function scanFromIndex(idx, branch, excludes) {
   const prefix = branch ? `${branch}/` : '';
-  const inner = [...excludes].filter((ex) => ex !== branch && ex.startsWith(prefix));
-  const excluded = (rel) => inner.some((ex) => rel === ex || rel.startsWith(`${ex}/`));
+  const pfx = ciKey(prefix);
+  // Сравниваем ровно ту часть пути, что займёт префикс: срезать всё равно
+  // придётся по длине исходной строки, а не приведённой.
+  const underBranch = (rel) =>
+    prefix === '' || (rel.length > prefix.length && ciKey(rel.slice(0, prefix.length)) === pfx);
+
+  const branchKey = ciKey(branch || '');
+  const inner = [...excludes]
+    .map(ciKey)
+    .filter((ex) => ex !== branchKey && ex.startsWith(pfx));
+  const excluded = (rel) => {
+    const k = ciKey(rel);
+    return inner.some((ex) => k === ex || k.startsWith(`${ex}/`));
+  };
 
   const files = [];
   const dirs = [];
   for (const [rel, meta] of idx.files) {
-    if (!rel.startsWith(prefix) || excluded(rel)) continue;
+    if (!underBranch(rel) || excluded(rel)) continue;
     files.push({ path: rel.slice(prefix.length), size: meta.size, mtimeMs: meta.mtimeMs });
   }
   for (const rel of idx.dirs) {
-    if (!rel.startsWith(prefix) || excluded(rel)) continue;
+    if (!underBranch(rel) || excluded(rel)) continue;
     dirs.push(rel.slice(prefix.length));
   }
   return { files, dirs };
@@ -199,9 +222,12 @@ function countByFolder(plan, folders) {
   const blank = () => ({ move: 0, copy: 0, overwrite: 0, trash: 0, unchanged: 0, dirs: 0, total: 0 });
   const counts = new Map(folders.map((f) => [f, blank()]));
   // От длинных к коротким: первое совпадение и есть самая точная ветка.
-  const bySpecificity = [...folders].sort((a, b) => b.length - a.length);
+  const bySpecificity = [...folders]
+    .sort((a, b) => b.length - a.length)
+    .map((f) => [f, ciKey(f)]);
   const bucketFor = (rel) => {
-    for (const f of bySpecificity) if (rel === f || rel.startsWith(f + '/')) return counts.get(f);
+    const k = ciKey(rel);
+    for (const [f, kf] of bySpecificity) if (k === kf || k.startsWith(kf + '/')) return counts.get(f);
     return null;
   };
 

@@ -9,7 +9,7 @@ const crypto = require('crypto');
 const { summarize } = require('./src/sync');
 const { scanFiles, listChildren, crawlTree, applyPlan, restoreStage } = require('./src/fsops');
 const { buildRunPlan, countByFolder, scanFromIndex } = require('./src/plan');
-const { rootsOverlap } = require('./src/paths');
+const { rootsOverlap, ciKey } = require('./src/paths');
 
 let mainWindow;
 
@@ -43,10 +43,15 @@ async function getScan(absFolderPath, excludes = null, onFile = null) {
 
 // Из общего списка исключений берёт те, что лежат внутри ветки folder,
 // и делает их относительными к folder (как ждёт scanFiles).
+// Регистр не сверяем по той же причине, что и везде: имя ветки могло прийти
+// с той стороны, которая пишет его иначе.
 function branchExcludes(excludes, folder) {
+  const prefix = folder + '/';
   const set = new Set();
   for (const ex of excludes) {
-    if (ex.startsWith(folder + '/')) set.add(ex.slice(folder.length + 1));
+    if (ex.length > prefix.length && ciKey(ex.slice(0, prefix.length)) === ciKey(prefix)) {
+      set.add(ex.slice(prefix.length));
+    }
   }
   return set;
 }
@@ -308,38 +313,39 @@ ipcMain.handle('list-folders', async (_event, { localPath, networkPath, relPath 
   ]);
 
   // Объединяем детей с обеих сторон по имени, помечая присутствие, тип и дату.
-  const map = new Map(); // name -> { isDir, hasLocal, hasNetwork, mtimeMs }
+  // Ключ — имя без учёта регистра: файловая система не различает 'Docs' и 'docs',
+  // а точное сравнение выдавало одну папку за две, каждую с пометкой «нет на другой
+  // стороне». Показываем то написание, что пришло первым.
+  const map = new Map(); // ciKey(name) -> { name, isDir, hasLocal, hasNetwork, mtimeMs }
   const merge = (entries, sideKey) => {
     for (const e of entries) {
-      const m = map.get(e.name) || { isDir: false, hasLocal: false, hasNetwork: false, mtimeMs: 0 };
+      const key = ciKey(e.name);
+      const m =
+        map.get(key) ||
+        { name: e.name, isDir: false, hasLocal: false, hasNetwork: false, mtimeMs: 0 };
       m.isDir = m.isDir || e.isDir;
       m[sideKey] = true;
       if (e.mtimeMs > m.mtimeMs) m.mtimeMs = e.mtimeMs; // берём более свежую сторону
-      map.set(e.name, m);
+      map.set(key, m);
     }
   };
   merge(local, 'hasLocal');
   merge(network, 'hasNetwork');
 
   // Сортировка: сначала папки, потом файлы; внутри — по имени.
-  const names = [...map.keys()].sort((a, b) => {
-    const A = map.get(a);
-    const B = map.get(b);
+  const merged = [...map.values()].sort((A, B) => {
     if (A.isDir !== B.isDir) return A.isDir ? -1 : 1;
-    return a.localeCompare(b);
+    return A.name.localeCompare(B.name);
   });
 
-  const items = names.map((name) => {
-    const m = map.get(name);
-    return {
-      name,
-      relPath: relPath ? `${relPath}/${name}` : name,
-      isDir: m.isDir,
-      hasLocal: m.hasLocal,
-      hasNetwork: m.hasNetwork,
-      mtimeMs: m.mtimeMs,
-    };
-  });
+  const items = merged.map((m) => ({
+    name: m.name,
+    relPath: relPath ? `${relPath}/${m.name}` : m.name,
+    isDir: m.isDir,
+    hasLocal: m.hasLocal,
+    hasNetwork: m.hasNetwork,
+    mtimeMs: m.mtimeMs,
+  }));
 
   return { items, localOk, networkOk };
 });

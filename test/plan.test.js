@@ -459,3 +459,59 @@ test('план по индексу и по живому скану сходит�
     ['док/лишний.txt']
   );
 });
+
+// ---- Регистр в путях ----
+
+test('переименование одного регистра не стирает файл с приёмника', async () => {
+  const src = await tmpDir();
+  const dst = await tmpDir();
+  await writeFile(src, 'док/Заметка.txt', 'тело');
+  await writeFile(dst, 'док/заметка.txt', 'тело');
+
+  const plan = await buildRunPlan(src, dst, ['док'], [], liveScan);
+  await applyPlan(src, dst, plan, mockTrash);
+
+  // Файл на месте и с прежним содержимым, а не унесён в Корзину вслед за копией.
+  assert.deepStrictEqual(await treeOf(dst), ['док/', 'док/Заметка.txt']);
+  assert.strictEqual(await fsp.readFile(path.join(dst, 'док/Заметка.txt'), 'utf8'), 'тело');
+
+  // Повтор пуст: сторонам больше нечего выяснять.
+  const again = await buildRunPlan(src, dst, ['док'], [], liveScan);
+  assert.strictEqual(summarize(again).total, 0);
+});
+
+test('ветка, написанная в регистре другой стороны, не выглядит пустой в индексе', async () => {
+  const src = await tmpDir();
+  const dst = await tmpDir();
+  await writeFile(src, 'док/а.txt', 'тело');
+  await writeFile(src, 'док/б.txt', 'тело2');
+  await writeFile(dst, 'Док/а.txt', 'тело');
+  await writeFile(dst, 'Док/б.txt', 'тело2');
+  const when = new Date(2020, 0, 1);
+  for (const [root, rel] of [[src, 'док/а.txt'], [dst, 'Док/а.txt'], [src, 'док/б.txt'], [dst, 'Док/б.txt']]) {
+    await fsp.utimes(path.join(root, rel), when, when);
+  }
+
+  // Интерфейс отдаёт ветку с написанием той стороны, что попала в список первой.
+  const plan = await buildRunPlan(
+    src,
+    dst,
+    ['Док'],
+    [],
+    indexScan(src, await indexOf(src), dst, await indexOf(dst))
+  );
+
+  // Раньше источник читался пустым, и весь приёмник уходил в удаление.
+  assert.deepStrictEqual(plan.trash.map((e) => e.path), []);
+  assert.deepStrictEqual(plan.dirs.remove, []);
+});
+
+test('scanFromIndex находит ветку независимо от регистра', () => {
+  const idx = {
+    files: new Map([['Док/а.txt', { size: 1, mtimeMs: 0 }], ['Док/вложено/б.txt', { size: 2, mtimeMs: 0 }]]),
+    dirs: new Set(['Док', 'Док/вложено']),
+  };
+  const got = scanFromIndex(idx, 'док', ['док/вложено']);
+  assert.deepStrictEqual(got.files.map((e) => e.path), ['а.txt']);
+  assert.deepStrictEqual(got.dirs, []);
+});

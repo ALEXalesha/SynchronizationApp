@@ -42,7 +42,15 @@ function createLimiter(max) {
 // onFile() — необязательный колбэк на каждый найденный файл (прогресс/отмена).
 // dirsOut — необязательный массив, куда складываются относительные пути папок.
 // Файлы читаются параллельно с ограничением SCAN_CONCURRENCY.
+// Исключения приводим к нижнему регистру один раз, на входе: путь ветки мог
+// прийти с той стороны, которая пишет имя иначе, а файловая система разницы
+// не видит. Дальше рекурсия работает уже с готовым набором.
 async function scanFiles(dir, rel = '', out = [], excludes = null, onFile = null, run = null, dirsOut = null) {
+  const skip = excludes && !run ? new Set([...excludes].map((e) => e.toLowerCase())) : excludes;
+  return scanInto(dir, rel, out, skip, onFile, run, dirsOut);
+}
+
+async function scanInto(dir, rel, out, excludes, onFile, run, dirsOut) {
   const limit = run || createLimiter(SCAN_CONCURRENCY);
   let dirents;
   try {
@@ -55,12 +63,12 @@ async function scanFiles(dir, rel = '', out = [], excludes = null, onFile = null
   const tasks = [];
   for (const dirent of dirents) {
     const childRel = rel ? `${rel}/${dirent.name}` : dirent.name;
-    if (excludes && excludes.has(childRel)) continue; // исключённая ветка
+    if (excludes && excludes.has(childRel.toLowerCase())) continue; // исключённая ветка
     if (dirent.isSymbolicLink()) continue;
     if (dirent.name === STAGE_DIR) continue;
     if (dirent.isDirectory()) {
       if (dirsOut) dirsOut.push(childRel);
-      tasks.push(scanFiles(dir, childRel, out, excludes, onFile, limit, dirsOut));
+      tasks.push(scanInto(dir, childRel, out, excludes, onFile, limit, dirsOut));
     } else if (dirent.isFile()) {
       tasks.push(
         limit(() => fsp.stat(path.join(dir, childRel))).then((stat) => {
@@ -417,6 +425,19 @@ async function applyPlan(srcRoot, dstRoot, plan, trashFn, onProgress = () => {},
   // Их откат не вернёт, поэтому число видно снаружи.
   let unrecoverable = 0;
 
+  // Оригиналы, застрявшие в служебной папке: отложены, заменить не вышло, вернуть
+  // на место — тоже (путь занят, файл держат открытым). В журнал они не попадают,
+  // а в конце работы служебная папка уезжает в Корзину целиком — вместе с ними,
+  // хотя другой копии у этих файлов нет. Помним их, чтобы выбросить только своё.
+  const orphans = [];
+  const putBack = async (relPath) => {
+    try {
+      await unstash(relPath);
+    } catch {
+      orphans.push(relPath);
+    }
+  };
+
   const doOverwrite = async (entry) => {
     let parked = true;
     try {
@@ -434,12 +455,12 @@ async function applyPlan(srcRoot, dstRoot, plan, trashFn, onProgress = () => {},
         // Источник исчез после сканирования. Заменять нечем, поэтому возвращаем
         // отложенный оригинал: без этого он уехал бы в Корзину вместе с мусором,
         // а на его месте не оказалось бы ничего.
-        if (parked) await unstash(entry.path).catch(() => {});
+        if (parked) await putBack(entry.path);
         fail('overwrite', entry.path, { code: 'ENOENT' });
       }
     } catch (err) {
       // Оригинал уже убран, а новый не лёг — возвращаем старый, чтобы файл не пропал.
-      if (parked) await unstash(entry.path).catch(() => {});
+      if (parked) await putBack(entry.path);
       fail('overwrite', entry.path, err);
     }
     report('overwrite', entry.path);
@@ -537,7 +558,17 @@ async function applyPlan(srcRoot, dstRoot, plan, trashFn, onProgress = () => {},
   const parkedCount = journal.stage.length + journal.overwrite.length + journal.conflict.length;
   if (parkedCount > 0) {
     try {
-      await trashFn(stageRoot);
+      if (orphans.length === 0) {
+        await trashFn(stageRoot);
+      } else {
+        // Внутри застрял чужой оригинал: его не удалось ни заменить, ни вернуть,
+        // и другой копии у него нет. Папку целиком тут выбрасывать нельзя —
+        // убираем поимённо только то, что записано в журнале, а застрявшее
+        // остаётся дожидаться restoreStage на следующем запуске.
+        for (const rel of [...journal.stage, ...journal.overwrite, ...journal.conflict]) {
+          await trashFn(path.join(stageRoot, rel));
+        }
+      }
       trashed = parkedCount;
       // Убираем каркас папок, если trashFn забрал только содержимое.
       await removeStageIfEmpty(stageRoot);

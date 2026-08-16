@@ -251,14 +251,26 @@ function updateHeads() {
 // Только по достоверному списку: недоступная сторона отдаёт пусто, и её папки
 // выглядят удалёнными. Стереть по такому списку значит потерять выбор из-за
 // одного моргнувшего соединения — а список обновляется каждые 6 секунд.
+//
+// Заодно подгоняем написание корневого сегмента под текущий список. Имя папки
+// берётся с той стороны, что попала в список первой, и пока локальная сторона
+// была недоступна, оно приходило с сетевой. Когда она возвращается, 'Док'
+// сменяется на 'док' — и отметка, ключ которой остался прежним, разом и пропадала
+// отсюда, и переставала совпадать со строкой в дереве.
 function pruneMarks({ localOk, networkOk }) {
   if (state.localPath && !localOk) return;
   if (state.networkPath && !networkOk) return;
 
-  const rootNames = new Set(state.roots.map((n) => n.relPath));
-  for (const key of [...state.marks.keys()]) {
-    if (!rootNames.has(key.split('/')[0])) state.marks.delete(key);
+  const byLower = new Map(state.roots.map((n) => [n.relPath.toLowerCase(), n.relPath]));
+  const kept = new Map();
+  for (const [key, mark] of state.marks) {
+    const slash = key.indexOf('/');
+    const head = slash < 0 ? key : key.slice(0, slash);
+    const actual = byLower.get(head.toLowerCase());
+    if (!actual) continue; // папки больше нет — отметку тоже убираем
+    kept.set(actual + key.slice(head.length), mark);
   }
+  state.marks = kept;
 }
 
 // ---- Загрузка дерева ----
