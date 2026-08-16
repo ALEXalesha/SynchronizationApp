@@ -1,0 +1,180 @@
+'use strict';
+
+// Модель выбора в дереве: трёхпозиционные отметки, наследование, регистр.
+// Отсюда уходят `folders` и `excludes` в главный процесс, поэтому ошибка здесь
+// означает синхронизацию не того, что отметил пользователь.
+
+const { test } = require('node:test');
+const assert = require('node:assert');
+const { loadRenderer, node } = require('./helpers/renderer-harness');
+
+// Каждому тесту — свой контекст: renderer.js держит состояние в модуле.
+function fresh() {
+  const api = loadRenderer();
+  const selection = () => {
+    const { folders, excludes } = api.collectSelection();
+    return { folders: folders.sort(), excludes: excludes.sort() };
+  };
+  return { api, selection };
+}
+
+test('отмеченная папка попадает в выбор', () => {
+  const { api, selection } = fresh();
+  api.toggleCheck(node('док'));
+  assert.deepStrictEqual(selection(), { folders: ['док'], excludes: [] });
+});
+
+test('снятая внутри ветки подпапка становится исключением', () => {
+  const { api, selection } = fresh();
+  api.toggleCheck(node('док'));
+  api.toggleCheck(node('док/архив'));
+  assert.deepStrictEqual(selection(), { folders: ['док'], excludes: ['док/архив'] });
+  assert.strictEqual(api.isIncluded('док/архив/файл.txt'), false);
+});
+
+test('самая точная отметка главнее: вложенная часть внутри исключённой', () => {
+  const { api, selection } = fresh();
+  api.toggleCheck(node('док'));
+  api.toggleCheck(node('док/архив'));
+  api.toggleCheck(node('док/архив/2024'));
+  assert.deepStrictEqual(selection(), {
+    folders: ['док', 'док/архив/2024'],
+    excludes: ['док/архив'],
+  });
+  assert.strictEqual(api.isIncluded('док/архив/2024/отчёт.txt'), true);
+  assert.strictEqual(api.isIncluded('док/архив/прочее.txt'), false);
+});
+
+// Чёрточка рисуется одинаково и когда ветка отмечена со снятой подпапкой,
+// и когда отмечена только подпапка. Клик по ней обязан вести себя одинаково:
+// раньше в первом случае он разом стирал весь выбор, а во втором — включал ветку.
+test('клик по «частичному» узлу включает ветку целиком в обоих случаях', () => {
+  const a = fresh();
+  a.api.toggleCheck(node('док'));
+  a.api.toggleCheck(node('док/архив'));
+  assert.strictEqual(a.api.nodeCheckState('док'), 'partial');
+  a.api.toggleCheck(node('док'));
+  assert.deepStrictEqual(a.selection(), { folders: ['док'], excludes: [] });
+
+  const b = fresh();
+  b.api.toggleCheck(node('док/архив'));
+  assert.strictEqual(b.api.nodeCheckState('док'), 'partial');
+  b.api.toggleCheck(node('док'));
+  assert.deepStrictEqual(b.selection(), { folders: ['док'], excludes: [] });
+});
+
+test('повторный клик по отмеченной ветке снимает выбор', () => {
+  const { api, selection } = fresh();
+  api.toggleCheck(node('док'));
+  api.toggleCheck(node('док'));
+  assert.deepStrictEqual(selection(), { folders: [], excludes: [] });
+});
+
+// Имя узла берётся с той стороны, что попала в список первой. Если вторая пишет
+// его иначе, точный ключ переставал совпадать — галочка пропадала сама собой.
+test('отметка находится независимо от написания пути', () => {
+  const { api } = fresh();
+  api.toggleCheck(node('Док'));
+  assert.strictEqual(api.isIncluded('док'), true);
+  assert.strictEqual(api.isIncluded('ДОК/внутри/ф.txt'), true);
+});
+
+test('исключение в другом написании ложится на ту же ветку', () => {
+  const { api, selection } = fresh();
+  api.toggleCheck(node('Док'));
+  api.toggleCheck(node('док/Архив'));
+  assert.deepStrictEqual(selection(), { folders: ['Док'], excludes: ['док/Архив'] });
+  assert.strictEqual(api.isIncluded('ДОК/архив/ф.txt'), false);
+});
+
+test('клик по тому же узлу в другом регистре снимает отметку, а не заводит вторую', () => {
+  const { api } = fresh();
+  api.toggleCheck(node('Отчёт'));
+  api.toggleCheck(node('отчёт'));
+  assert.strictEqual(api.state.marks.size, 0);
+});
+
+test('отметка исчезнувшей папки убирается, написание корня подгоняется', () => {
+  const { api, selection } = fresh();
+  api.state.roots = [node('Док')];
+  api.toggleCheck(node('док'));
+  api.toggleCheck(node('док/внутри'));
+  api.toggleCheck(node('пропала'));
+  api.pruneMarks({ localOk: true, networkOk: true });
+  assert.deepStrictEqual(selection(), { folders: ['Док'], excludes: ['Док/внутри'] });
+});
+
+// Недоступная сторона отдаёт пустой список, и её папки выглядят удалёнными.
+// Чистить по такому списку — значит потерять выбор из-за одного моргания связи.
+test('моргнувшая связь не стирает отметки', () => {
+  const { api, selection } = fresh();
+  api.state.localPath = 'C:/local';
+  api.state.networkPath = '\\\\srv\\share';
+  api.state.roots = [];
+  api.toggleCheck(node('док'));
+  api.pruneMarks({ localOk: false, networkOk: true });
+  assert.deepStrictEqual(selection(), { folders: ['док'], excludes: [] });
+});
+
+test('«Выбрать все» и «Снять все»', () => {
+  const { api, selection } = fresh();
+  api.state.roots = [node('a'), node('b'), node('c')];
+  api.onSelectAll({ target: { checked: true } });
+  assert.deepStrictEqual(selection().folders, ['a', 'b', 'c']);
+  api.toggleCheck(node('b'));
+  assert.deepStrictEqual(selection().folders, ['a', 'c']);
+  api.onSelectAll({ target: { checked: false } });
+  assert.deepStrictEqual(selection(), { folders: [], excludes: [] });
+});
+
+test('состояние узлов вокруг глубокого исключения', () => {
+  const { api } = fresh();
+  api.toggleCheck(node('п'));
+  api.toggleCheck(node('п/q/r/s'));
+  assert.strictEqual(api.nodeCheckState('п'), 'partial');
+  assert.strictEqual(api.nodeCheckState('п/q/r'), 'partial');
+  assert.strictEqual(api.nodeCheckState('п/q/сосед'), 'checked');
+  assert.strictEqual(api.isIncluded('п/q/r'), true);
+  assert.strictEqual(api.isIncluded('п/q/r/s/глубже.txt'), false);
+});
+
+test('размер строки находится при другом написании пути', () => {
+  const { api } = fresh();
+  const n = { relPath: 'Док', name: 'Док', isDir: true, hasLocal: true, hasNetwork: false };
+  assert.strictEqual(api.metaFor(n, 'network').text, 'нет в сети');
+  assert.strictEqual(api.metaFor(n, 'local').text, '');
+  api.mergeSizes([{ relPath: 'док', sizeLocal: 2048, cntLocal: 3, sizeNetwork: null, cntNetwork: null }]);
+  assert.match(api.metaFor(n, 'local').text, /3 файлов/);
+});
+
+test('шкала размеров не кончается раньше числа', () => {
+  const { api } = fresh();
+  assert.strictEqual(api.formatSize(0), '0 Б');
+  assert.strictEqual(api.formatSize(null), '');
+  assert.strictEqual(api.formatSize(1536), '1.5 КБ');
+  assert.doesNotMatch(api.formatSize(2 ** 70), /undefined|NaN/);
+});
+
+test('имена и пути экранируются перед вставкой в разметку', () => {
+  const { api } = fresh();
+  assert.strictEqual(api.escapeHtml('<img src=x onerror="1">'), '&lt;img src=x onerror=&quot;1&quot;&gt;');
+  assert.strictEqual(api.escapeHtml('&lt;'), '&amp;lt;');
+});
+
+test('папки всегда выше файлов, по дате — новые сверху', () => {
+  const { api } = fresh();
+  api.state.sort = 'name';
+  const byName = api.sortNodes([
+    { name: 'я', isDir: false, mtimeMs: 9 },
+    { name: 'б', isDir: true, mtimeMs: 1 },
+    { name: 'а', isDir: false, mtimeMs: 5 },
+  ]).map((n) => n.name).slice();
+  assert.deepStrictEqual(byName, ['б', 'а', 'я']);
+
+  api.state.sort = 'date';
+  const byDate = api.sortNodes([
+    { name: 'старый', isDir: false, mtimeMs: 1 },
+    { name: 'новый', isDir: false, mtimeMs: 99 },
+  ]).map((n) => n.name).slice();
+  assert.deepStrictEqual(byDate, ['новый', 'старый']);
+});

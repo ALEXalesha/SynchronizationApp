@@ -616,9 +616,27 @@ ipcMain.handle('cancel-sync', () => {
 });
 
 // Выполнение синхронизации выбранных веток. Прогресс шлётся в renderer событиями.
-ipcMain.handle('sync', async (event, { localPath, networkPath, folders, excludes = [], direction }) => {
+// Замок на время работы. Два запуска разом делят служебную папку на приёмнике
+// так же, как две копии приложения: restoreStage второго на старте возвращает
+// «брошенные» оригиналы прямо из-под первого, который в этот момент ими и занят.
+// От второго процесса защищает одиночный экземпляр, а от второго вызова — этот
+// флаг. Интерфейс на время работы блокирует кнопку, но полагаться на интерфейс
+// нельзя: последствия доходят до файлов.
+let syncRunning = false;
+ipcMain.handle('sync', async (event, args) => {
+  if (syncRunning) return { error: 'синхронизация уже идёт' };
+  syncRunning = true;
+  try {
+    return await performSync(event, args);
+  } finally {
+    syncRunning = false;
+  }
+});
+
+async function performSync(event, { localPath, networkPath, folders, excludes = [], direction }) {
   const srcRoot = direction === 'toNetwork' ? localPath : networkPath;
   const dstRoot = direction === 'toNetwork' ? networkPath : localPath;
+
   syncStopped = false;
 
   // Первым делом — до restoreStage, которая уже двигает файлы. Недоступная
@@ -799,4 +817,4 @@ ipcMain.handle('sync', async (event, { localPath, networkPath, folders, excludes
     failures: res.failures.length,
     failuresSample: res.failures.slice(0, 5).map((f) => `${f.path} (${f.code})`),
   };
-});
+}

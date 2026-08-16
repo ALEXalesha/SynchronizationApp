@@ -369,7 +369,13 @@ async function toggleExpand(node) {
 function toggleCheck(node) {
   const rel = node.relPath;
   const key = markKey(rel);
-  const want = !isIncluded(rel);
+  // Узел с отметками внутри рисуется чёрточкой независимо от того, отмечен ли
+  // он сам, — и клик по чёрточке всегда включает ветку целиком, как в любом
+  // трёхпозиционном списке. Решение принималось по внутреннему состоянию,
+  // которого на экране не видно: две одинаковые с виду чёрточки вели себя
+  // противоположно — у отмеченной ветки со снятой подпапкой клик разом стирал
+  // весь выбор, у неотмеченной с выбранной подпапкой — включал ветку.
+  const want = hasDescendantMark(rel) ? true : !isIncluded(rel);
   const inherited = inheritedIncluded(rel);
 
   const prefix = key + '/';
