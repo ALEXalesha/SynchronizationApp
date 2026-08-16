@@ -106,7 +106,30 @@ async function planForBranch(srcRoot, dstRoot, branch, excludes, scan) {
     dstType === 'dir' ? scan(dstRoot, branch, excludes) : { files: [], dirs: [] },
   ]);
   const under = (rel) => (branch ? `${branch}/${rel}` : rel);
+  // Корень ветки скан отдаёт пустой строкой — путём от корня она и есть ветка.
+  const underPath = (rel) => (rel === '' ? branch || '' : under(rel));
   const rebase = (entries) => entries.map((e) => ({ ...e, path: under(e.path) }));
+
+  // Папки, закрытые правами хотя бы на одной стороне. Внутрь такого узла не видно,
+  // и сравнивать там нечего — содержимое выбрасываем из плана на ОБЕИХ сторонах
+  // разом. Порознь нельзя: закрытая ветка на источнике читалась бы как пустая,
+  // а пустой источник означает «на приёмнике всё лишнее», и одна ошибка прав
+  // стирала бы с приёмника живую ветку целиком. Сам узел из списка папок
+  // не убираем: он существует, просто заглянуть в него не дают, — и значит
+  // ни создавать его, ни сносить не нужно.
+  const skipped = topPaths([...(src.skipped || []), ...(dst.skipped || [])]);
+  const skipKeys = skipped.map(ciKey);
+  const blind = (rel) => {
+    const k = ciKey(rel);
+    // Пустой ключ — закрыт сам корень ветки: не видно вообще ничего.
+    return skipKeys.some((c) => c === '' || k.startsWith(c + '/'));
+  };
+  const seen = (side) =>
+    skipped.length
+      ? { files: side.files.filter((e) => !blind(e.path)), dirs: side.dirs.filter((d) => !blind(d)) }
+      : side;
+  const srcSeen = seen(src);
+  const dstSeen = seen(dst);
 
   // Тот же конфликт типов, но в глубине ветки. Скан его переживает — типы он
   // читает из dirent на каждой стороне отдельно, — а вот план ломался: mkdir
@@ -115,14 +138,14 @@ async function planForBranch(srcRoot, dstRoot, branch, excludes, scan) {
   // Приёмник расчищаем целиком одним действием, поэтому всё, что лежало внутри
   // такого узла, из плана вычёркиваем: к моменту удаления по одному его уже нет.
   // Результат скана при этом не трогаем — он лежит в кеше и переживёт нас.
-  const inner = findTypeConflicts(src, dst);
+  const inner = findTypeConflicts(srcSeen, dstSeen);
   const innerKeys = inner.map(ciKey);
   const covered = (rel) => {
     const k = ciKey(rel);
     return innerKeys.some((c) => k === c || k.startsWith(c + '/'));
   };
-  const dstFiles = inner.length ? dst.files.filter((e) => !covered(e.path)) : dst.files;
-  const dstDirs = inner.length ? dst.dirs.filter((d) => !covered(d)) : dst.dirs;
+  const dstFiles = inner.length ? dstSeen.files.filter((e) => !covered(e.path)) : dstSeen.files;
+  const dstDirs = inner.length ? dstSeen.dirs.filter((d) => !covered(d)) : dstSeen.dirs;
   appendAll(conflicts, inner.map(under));
 
   // Сама ветка — часть структуры: без неё пустая выбранная папка не создастся,
@@ -130,10 +153,11 @@ async function planForBranch(srcRoot, dstRoot, branch, excludes, scan) {
   const self = branch ? [branch] : [];
 
   return {
-    plan: planSync(rebase(src.files), rebase(dstFiles)),
-    srcDirs: [...srcParents, ...(srcType === 'dir' ? [...self, ...src.dirs.map(under)] : [])],
+    plan: planSync(rebase(srcSeen.files), rebase(dstFiles)),
+    srcDirs: [...srcParents, ...(srcType === 'dir' ? [...self, ...srcSeen.dirs.map(under)] : [])],
     dstDirs: [...dstParents, ...(dstType === 'dir' ? [...self, ...dstDirs.map(under)] : [])],
     conflicts,
+    skipped: skipped.map(underPath),
   };
 }
 
@@ -194,7 +218,23 @@ function scanFromIndex(idx, branch, excludes) {
     if (!underBranch(rel) || excluded(rel)) continue;
     dirs.push(rel.slice(prefix.length));
   }
-  return { files, dirs };
+  // Закрытые правами папки обход тоже запоминает, и отдать их надо ровно так же,
+  // как это делает живой скан: планировщик обязан вести себя одинаково независимо
+  // от того, включён подсчёт размеров или нет. Разойдись эти два пути — один
+  // и тот же выбор давал бы разный результат, а такую разницу пользователю
+  // ни увидеть, ни объяснить.
+  const skipped = [];
+  for (const rel of idx.skipped || []) {
+    // Закрыт сам корень ветки — живой скан обозначает это пустой строкой,
+    // потому что он и стартует изнутри ветки. Индекс же держит полные пути.
+    if (ciKey(rel) === branchKey) {
+      skipped.push('');
+      continue;
+    }
+    if (!underBranch(rel) || excluded(rel)) continue;
+    skipped.push(rel.slice(prefix.length));
+  }
+  return { files, dirs, skipped };
 }
 
 // Дописывает items в конец target. Именно циклом, а не push(...items):
@@ -205,15 +245,17 @@ function appendAll(target, items) {
   for (const item of items) target.push(item);
 }
 
-// Оставляет только верхние конфликтные узлы: без повторов и без вложенных.
-// Общий предок двух выбранных веток приходит сюда дважды, а конфликт в глубине
-// ветки может оказаться внутри конфликтного предка. Узел уезжает в служебную
-// папку целиком, поэтому второй заход по тому же месту нашёл бы там пусто —
-// и записал бы в отчёт файл, удалённый безвозвратно, хотя он цел.
-function topConflicts(conflicts) {
+// Оставляет только верхние узлы списка: без повторов и без вложенных.
+// Для конфликтов это обязательно: общий предок двух выбранных веток приходит
+// сюда дважды, а конфликт в глубине ветки может оказаться внутри конфликтного
+// предка. Узел уезжает в служебную папку целиком, поэтому второй заход по тому же
+// месту нашёл бы там пусто — и записал бы в отчёт файл, удалённый безвозвратно,
+// хотя он цел. Для закрытых правами папок — та же логика: показывать пользователю
+// вложенные пути внутри уже названной закрытой ветки незачем.
+function topPaths(paths) {
   const kept = [];
   const keys = [];
-  for (const rel of [...conflicts].sort((a, b) => a.length - b.length)) {
+  for (const rel of [...paths].sort((a, b) => a.length - b.length)) {
     const k = ciKey(rel);
     if (keys.some((c) => k === c || k.startsWith(c + '/'))) continue;
     kept.push(rel);
@@ -266,6 +308,7 @@ async function buildRunPlan(srcRoot, dstRoot, folders, excludes, scan) {
   const srcDirs = [];
   const dstDirs = [];
   const conflicts = [];
+  const skipped = [];
 
   for (const folder of folders) {
     const branch = await planForBranch(srcRoot, dstRoot, folder, excludes, scan);
@@ -273,12 +316,16 @@ async function buildRunPlan(srcRoot, dstRoot, folders, excludes, scan) {
     appendAll(srcDirs, branch.srcDirs);
     appendAll(dstDirs, branch.dstDirs);
     appendAll(conflicts, branch.conflicts);
+    appendAll(skipped, branch.skipped || []);
   }
 
   const plan = detectMoves(merged);
   await confirmMoves(srcRoot, dstRoot, plan);
   plan.dirs = planDirs(srcDirs, dstDirs);
-  plan.conflicts = topConflicts(conflicts);
+  plan.conflicts = topPaths(conflicts);
+  // Закрытые правами папки в план работ не входят, но пользователю о них сказать
+  // обязаны: иначе ветка молча не синхронизируется, а отчёт рапортует «Готово».
+  plan.skipped = topPaths(skipped);
   return plan;
 }
 

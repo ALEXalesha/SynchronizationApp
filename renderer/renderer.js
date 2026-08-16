@@ -112,6 +112,17 @@ function setStatus(kind, text, summary = '') {
 function markKey(relPath) {
   return relPath.toLowerCase();
 }
+// Раскрытые ветки помним тем же ключом, что и отметки, и по той же причине.
+// Имя папки берётся с той стороны, что попала в список первой: пока локальная
+// сторона недоступна, оно приходит с сетевой, а когда она возвращается — 'док'
+// сменяется на 'Док'. Точный ключ этого не переживал: раскрытая ветка схлопывалась
+// сама собой каждые шесть секунд, стоило связи моргнуть.
+function expandKey(relPath) {
+  return relPath.toLowerCase();
+}
+function isExpanded(relPath) {
+  return state.expanded.has(expandKey(relPath));
+}
 function inheritedIncluded(relPath) {
   const parts = relPath.split('/');
   for (let i = parts.length - 1; i >= 1; i--) {
@@ -346,6 +357,12 @@ async function loadChildren(node) {
     node.children = items.map(makeNode);
     node._sorted = null; // дети изменились — пересортировать
     node.loaded = true;
+  } catch {
+    // Запрос не дошёл (окно перезагружают, сторона отвалилась). Молчать нельзя:
+    // без этой ветки исключение улетало наружу, перерисовки не происходило,
+    // и на строке навсегда оставался крутящийся значок загрузки. Ветка просто
+    // остаётся нераскрытой — следующий клик попробует снова.
+    state.expanded.delete(expandKey(node.relPath));
   } finally {
     node.loading = false;
   }
@@ -355,12 +372,12 @@ async function loadChildren(node) {
 // ---- Развернуть / свернуть (только для папок) ----
 async function toggleExpand(node) {
   if (!node.isDir) return;
-  if (state.expanded.has(node.relPath)) {
-    state.expanded.delete(node.relPath);
+  if (isExpanded(node.relPath)) {
+    state.expanded.delete(expandKey(node.relPath));
     renderTree();
     return;
   }
-  state.expanded.add(node.relPath);
+  state.expanded.add(expandKey(node.relPath));
   if (!node.loaded) await loadChildren(node);
   else renderTree();
 }
@@ -425,7 +442,7 @@ function walk(sorted, depth) {
     el.localList.appendChild(buildRow(node, depth, 'local'));
     el.networkList.appendChild(buildRow(node, depth, 'network'));
 
-    if (node.isDir && state.expanded.has(node.relPath) && node.loaded) {
+    if (node.isDir && isExpanded(node.relPath) && node.loaded) {
       if (node.children.length === 0) {
         appendPlaceholder('(пусто)', depth + 1);
       } else {
@@ -482,7 +499,7 @@ function buildRow(node, depth, side) {
   } else if (node.loading) {
     caret.classList.add('mini-spin');
   } else {
-    caret.textContent = state.expanded.has(node.relPath) ? '▾' : '▸';
+    caret.textContent = isExpanded(node.relPath) ? '▾' : '▸';
     caret.addEventListener('click', (e) => {
       e.stopPropagation();
       toggleExpand(node);
@@ -603,10 +620,14 @@ window.api.onCrawl({
     mergeSizes(entries);
     setStatus('busy', 'Загрузка размеров и файлов…', `${fmtNum(scanned)} объектов`);
   },
-  onDone: ({ scanned, ok, toobig, partial }) => {
+  onDone: ({ scanned, ok, toobig, partial, noAccess }) => {
     // partial — сторона пропала посреди обхода. Размеры показать можно, но они
     // неполные, и молчаливое «Готово» выдало бы их за полную картину.
-    if (ok && partial)
+    // noAccess — другое: папки на месте, но внутрь не пускают. Звать чинить
+    // связь тут незачем, а знать про пропуск всё равно нужно.
+    if (ok && !partial && noAccess)
+      setStatus('done', `Готово, ${noAccess} папок без доступа`, `${fmtNum(scanned)} объектов`);
+    else if (ok && partial)
       setStatus('error', 'Связь оборвалась — размеры неполные, нажмите «Обновить»', `${fmtNum(scanned)} объектов`);
     else if (ok) setStatus('done', 'Готово', `${fmtNum(scanned)} объектов`);
     else if (toobig)
@@ -677,7 +698,7 @@ async function openPreview() {
 }
 
 let lastPreviewTotals = { move: 0, copy: 0, overwrite: 0, trash: 0, dirs: 0 };
-function renderPreview({ perFolder, totals, destTrashable }) {
+function renderPreview({ perFolder, totals, destTrashable, skipped = [], skippedTotal = 0 }) {
   lastPreviewTotals = totals;
   const dirLabel = state.direction === 'toNetwork' ? 'Локально → Сеть' : 'Сеть → Локально';
   const delLabel = destTrashable ? 'в Корзину' : 'удалить';
@@ -693,12 +714,20 @@ function renderPreview({ perFolder, totals, destTrashable }) {
   const dirsNote = totals.dirs
     ? `<div class="preview-note">Папок привести в порядок: ${totals.dirs}</div>`
     : '';
+  // Папки, закрытые правами. Их содержимое не сравнивается ни на одной стороне,
+  // поэтому оно останется как есть — и сказать об этом надо до запуска, а не
+  // оставлять пользователя гадать, почему ветка не синхронизируется.
+  const skipNote = skippedTotal
+    ? `<div class="preview-warn">⚠ Нет доступа к ${skippedTotal} папкам — их содержимое не тронуто ни на одной стороне:<br>${skipped
+        .map((p) => escapeHtml(p))
+        .join('<br>')}${skippedTotal > skipped.length ? '<br>…' : ''}</div>`
+    : '';
   el.previewSummary.innerHTML = `
     ${moveStat}
     <div class="stat copy"><span class="num">${totals.copy}</span><span class="lbl">скопировать</span></div>
     <div class="stat overwrite"><span class="num">${totals.overwrite}</span><span class="lbl">перезаписать</span></div>
     <div class="stat trash"><span class="num">${totals.trash}</span><span class="lbl">${delLabel}</span></div>
-    ${dirsNote}${warn}`;
+    ${dirsNote}${warn}${skipNote}`;
 
   el.previewList.innerHTML =
     `<li class="pv-head" style="color:var(--text-dim);font-size:12px">${dirLabel}</li>` +
@@ -822,12 +851,18 @@ async function runSync() {
         '<div class="preview-note">Синхронизация прервана. Скопированное удалено, перезаписанное и удалённое возвращено на место.</div>' + lost;
     } else {
       const perm = res && res.permanentDeletes ? ` · удалено безвозвратно: ${res.permanentDeletes}` : '';
+      // Закрытые правами папки не ошибка и не работа — но и не «всё сделано».
+      const skip =
+        res && res.skippedTotal
+          ? `<div class="preview-note">Пропущено папок без доступа: ${res.skippedTotal}. Их содержимое не тронуто ни на одной стороне.</div>`
+          : '';
       if (res && res.failures) {
         el.progressText.textContent = `Готово с ошибками: ${res.failures} файлов не удалось${perm}`;
         const sample = (res.failuresSample || []).map((s) => escapeHtml(s)).join('<br>');
-        el.previewSummary.innerHTML = `<div class="preview-warn">⚠ Не удалось обработать ${res.failures} файлов (нет прав или заняты):<br>${sample}${res.failures > 5 ? '<br>…' : ''}</div>`;
+        el.previewSummary.innerHTML = `<div class="preview-warn">⚠ Не удалось обработать ${res.failures} файлов (нет прав или заняты):<br>${sample}${res.failures > 5 ? '<br>…' : ''}</div>${skip}`;
       } else {
         el.progressText.textContent = `Готово ✓${perm}`;
+        if (skip) el.previewSummary.innerHTML = skip;
       }
     }
     el.confirmBtn.textContent = 'Закрыть';
@@ -882,7 +917,7 @@ function renderHistory(list) {
   }
 
   el.historyList.innerHTML = list
-    .map((run) => {
+    .map((run, i) => {
       const dir = run.direction === 'toNetwork' ? 'Локально → Сеть' : 'Сеть → Локально';
       const t = run.totals || { copy: 0, overwrite: 0, trash: 0 };
       const parts = [];
@@ -898,39 +933,56 @@ function renderHistory(list) {
       if (run.failures)
         badges.push(`<span class="hist-badge warn">ошибок: ${run.failures}</span>`);
 
-      const files = (run.files || [])
-        .map((f) => {
-          const sym = { trash: '−', overwrite: '~', copy: '+', move: '→' }[f.action] || '';
-          return `<div class="hist-file ${f.action}">${sym} ${escapeHtml(f.path)}</div>`;
-        })
-        .join('');
-      const more = run.filesTruncated
-        ? `<div class="hist-file muted">…ещё ${run.filesTruncated} (не сохранены)</div>`
-        : '';
-
       return `
         <div class="hist-run">
-          <div class="hist-head">
+          <div class="hist-head" data-run="${i}">
             <span class="hist-caret">▸</span>
             <span class="hist-time">${escapeHtml(fmtDateTime(run.time))}</span>
             <span class="hist-dir">${dir}</span>
             <span class="hist-counts">${counts}</span>
             ${badges.join(' ')}
           </div>
-          <div class="hist-files" hidden>${files}${more}</div>
+          <div class="hist-files" hidden></div>
         </div>`;
     })
     .join('');
 
   el.historyList.querySelectorAll('.hist-head').forEach((head) => {
     head.addEventListener('click', () => {
-      const files = head.nextElementSibling;
+      const box = head.nextElementSibling;
       const caret = head.querySelector('.hist-caret');
-      const wasHidden = files.hidden;
-      files.hidden = !wasHidden;
+      const wasHidden = box.hidden;
+      // Разметку строим только при первом раскрытии. Заранее — значит собрать её
+      // разом для всех запусков: при полной истории это до миллиона строк в одной
+      // innerHTML, и окно вставало намертво ещё до того, как его показывали.
+      if (wasHidden && !box.dataset.filled) {
+        box.innerHTML = historyFilesHtml(list[Number(head.dataset.run)]);
+        box.dataset.filled = '1';
+      }
+      box.hidden = !wasHidden;
       caret.textContent = wasHidden ? '▾' : '▸';
     });
   });
+}
+
+// Строки файлов одного запуска. Старые записи хранятся без перечня — тогда
+// говорим об этом прямо, а не показываем пустоту.
+function historyFilesHtml(run) {
+  if (!run) return '';
+  if (run.detailsDropped) {
+    const n = run.fileCount ? ` (${fmtNum(run.fileCount)})` : '';
+    return `<div class="hist-file muted">Список файлов${n} не сохранён: подробности хранятся только у последних запусков.</div>`;
+  }
+  const files = (run.files || [])
+    .map((f) => {
+      const sym = { trash: '−', overwrite: '~', copy: '+', move: '→' }[f.action] || '';
+      return `<div class="hist-file ${f.action}">${sym} ${escapeHtml(f.path)}</div>`;
+    })
+    .join('');
+  const more = run.filesTruncated
+    ? `<div class="hist-file muted">…ещё ${run.filesTruncated} (не сохранены)</div>`
+    : '';
+  return files + more || '<div class="hist-file muted">Файлы не записаны.</div>';
 }
 
 // ---- Постоянная проверка доступности папок ----
@@ -960,13 +1012,21 @@ async function lightRelistTop() {
   if (state.localPath && !listing.localOk) return;
   if (state.networkPath && !listing.networkOk) return;
 
+  // Сравниваем и ищем узлы по ключу без учёта регистра. Написание имени берётся
+  // с той стороны, что попала в список первой, и когда пропадавшая сторона
+  // возвращается, 'док' сменяется на 'Док'. Точный ключ принимал это за другую
+  // папку: старый узел выбрасывался вместе с загруженными детьми, раскрытая
+  // ветка схлопывалась, а подпись строки «менялась» на ровном месте — и так
+  // каждые шесть секунд, пока связь моргала.
   const sig = (arr) =>
-    arr.map((n) => `${n.relPath}:${n.hasLocal ? 1 : 0}${n.hasNetwork ? 1 : 0}`).join('|');
+    arr.map((n) => `${markKey(n.relPath)}:${n.hasLocal ? 1 : 0}${n.hasNetwork ? 1 : 0}`).join('|');
   const oldSig = sig(state.roots);
-  const byRel = new Map(state.roots.map((n) => [n.relPath, n]));
+  const byRel = new Map(state.roots.map((n) => [markKey(n.relPath), n]));
   state.roots = listing.items.map((it) => {
-    const ex = byRel.get(it.relPath);
+    const ex = byRel.get(markKey(it.relPath));
     if (ex) {
+      ex.name = it.name; // написание подтягиваем за листингом
+      ex.relPath = it.relPath;
       ex.isDir = it.isDir;
       ex.hasLocal = it.hasLocal;
       ex.hasNetwork = it.hasNetwork;

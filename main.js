@@ -40,16 +40,19 @@ function pruneScanCache(now) {
   }
 }
 
-// Возвращает { files, dirs } — оба списка относительно absFolderPath.
+// Возвращает { files, dirs, skipped } — все списки относительно absFolderPath.
+// skipped — папки, закрытые правами: заглянуть внутрь не дали. Планировщик
+// обходит их стороной на обеих сторонах сразу.
 async function getScan(absFolderPath, excludes = null, onFile = null) {
   const key = cacheKey(absFolderPath, excludes);
   const hit = scanCache.get(key);
   if (hit && Date.now() - hit.at < SCAN_TTL_MS) return hit;
   const dirs = [];
-  const files = await scanFiles(absFolderPath, '', [], excludes, onFile, null, dirs);
+  const skipped = [];
+  const files = await scanFiles(absFolderPath, '', [], excludes, onFile, null, dirs, skipped);
   const now = Date.now();
   pruneScanCache(now);
-  scanCache.set(key, { files, dirs, at: now });
+  scanCache.set(key, { files, dirs, skipped, at: now });
   return scanCache.get(key);
 }
 
@@ -105,8 +108,12 @@ async function assertRootsReachable(srcRoot, dstRoot) {
 function crawlSideFor(root) {
   if (!crawlData || !crawlData.complete) return null;
   if (Date.now() - crawlData.at > SCAN_TTL_MS) return null;
-  if (root && root === crawlData.localPath) return { files: crawlData.local, dirs: crawlData.localDirs };
-  if (root && root === crawlData.networkPath) return { files: crawlData.network, dirs: crawlData.networkDirs };
+  if (root && root === crawlData.localPath) {
+    return { files: crawlData.local, dirs: crawlData.localDirs, skipped: crawlData.localSkipped };
+  }
+  if (root && root === crawlData.networkPath) {
+    return { files: crawlData.network, dirs: crawlData.networkDirs, skipped: crawlData.networkSkipped };
+  }
   return null;
 }
 
@@ -190,6 +197,27 @@ function saveSizeCacheSync(localPath, networkPath, entries) {
 const historyPath = path.join(app.getPath('userData'), 'history.json');
 const HISTORY_MAX_RUNS = 200; // сколько запусков храним
 const HISTORY_FILE_CAP = 5000; // максимум файлов в одной записи (удаления в приоритете)
+// У скольких последних запусков храним поимённый список файлов. Остальные
+// остаются в истории строкой с итогами, но без перечня.
+//
+// Пределы перемножались: 200 запусков по 5000 файлов — это 87 МБ в history.json
+// и миллион строк в окне истории. Файл целиком перечитывался и переписывался
+// после каждой синхронизации, целиком уезжал в renderer и целиком превращался
+// в разметку — окно истории вставало намертво, а каждый запуск платил за это
+// сотней мегабайт записи. Свежие запуски и есть те, в которые заглядывают;
+// у давних важен сам факт и счётчики.
+const HISTORY_DETAIL_RUNS = 20;
+
+// Срезает поимённые списки у старых записей. Считаем прямо на чтении и на записи:
+// на диске от прежних версий лежит история, выросшая без этого предела, и первым
+// же обращением она приходит в норму.
+function trimHistoryDetails(list) {
+  return list.map((run, i) => {
+    if (i < HISTORY_DETAIL_RUNS || !run || !run.files) return run;
+    const { files, ...rest } = run;
+    return { ...rest, detailsDropped: true, fileCount: files.length };
+  });
+}
 
 async function loadHistory() {
   try {
@@ -206,14 +234,14 @@ async function appendHistory(record) {
     list.unshift(record); // новые сверху
     if (list.length > HISTORY_MAX_RUNS) list.length = HISTORY_MAX_RUNS;
     const tmp = `${historyPath}.${++saveSeq}.tmp`;
-    await fsp.writeFile(tmp, JSON.stringify(list));
+    await fsp.writeFile(tmp, JSON.stringify(trimHistoryDetails(list)));
     await fsp.rename(tmp, historyPath);
   } catch {
     // история не критична
   }
 }
 
-ipcMain.handle('get-history', () => loadHistory());
+ipcMain.handle('get-history', async () => trimHistoryDetails(await loadHistory()));
 ipcMain.handle('clear-history', async () => {
   try {
     await fsp.rm(historyPath, { force: true });
@@ -222,8 +250,15 @@ ipcMain.handle('clear-history', async () => {
   }
 });
 
-// Удаляет осиротевшие временные файлы (.tmp) от прерванных атомарных записей.
-// На старте активных записей ещё нет, поэтому любой .tmp — мусор.
+// Сколько кешей размеров держим. Кеш заводится на каждую пару путей и живёт
+// вечно: перебрал пользователь десяток папок — десяток файлов и остался, а на
+// дереве в 300 тысяч узлов каждый весит десятки мегабайт. Никто их не удалял,
+// и место утекало молча. Держим только последние по времени записи.
+const SIZE_CACHE_KEEP = 6;
+
+// Удаляет осиротевшие временные файлы (.tmp) от прерванных атомарных записей
+// и лишние кеши размеров. На старте активных записей ещё нет, поэтому любой
+// .tmp — мусор, а любой кеш можно трогать без оглядки на текущую работу.
 async function cleanupTempFiles() {
   try {
     const dir = app.getPath('userData');
@@ -232,6 +267,19 @@ async function cleanupTempFiles() {
       files
         .filter((f) => f.endsWith('.tmp'))
         .map((f) => fsp.rm(path.join(dir, f), { force: true }).catch(() => {}))
+    );
+
+    const caches = files.filter((f) => f.startsWith('sizecache-') && f.endsWith('.json'));
+    if (caches.length <= SIZE_CACHE_KEEP) return;
+    const dated = await Promise.all(
+      caches.map(async (f) => {
+        const at = await fsp.stat(path.join(dir, f)).then((s) => s.mtimeMs, () => 0);
+        return { f, at };
+      })
+    );
+    dated.sort((a, b) => b.at - a.at);
+    await Promise.all(
+      dated.slice(SIZE_CACHE_KEEP).map((e) => fsp.rm(path.join(dir, e.f), { force: true }).catch(() => {}))
     );
   } catch {
     // не критично
@@ -399,9 +447,9 @@ let crawlData = null;
 // Папку проверяем до и после: пропавшая посреди обхода сеть отдаёт ENOENT,
 // crawlTree принимает это за пустую ветку, и получается частичный индекс —
 // а он опаснее отсутствия индекса, потому что по нему приёмник выглядит лишним.
-async function crawlSide(root, onEntry) {
+async function crawlSide(root, onEntry, skippedOut) {
   if (!(await isDir(root))) return false;
-  await crawlTree(root, '', onEntry);
+  await crawlTree(root, '', onEntry, null, skippedOut);
   return isDir(root);
 }
 
@@ -435,6 +483,11 @@ ipcMain.handle('start-crawl', async (event, { localPath, networkPath, noLimit = 
   const fileNetwork = new Map();
   const dirLocal = new Set();
   const dirNetwork = new Set();
+  // Папки, закрытые правами. Держим их рядом с индексом: план обязан обойти
+  // их так же, как это делает живой скан, иначе включённый подсчёт размеров
+  // менял бы результат синхронизации.
+  const skipLocal = [];
+  const skipNetwork = [];
   crawlData = {
     localPath,
     networkPath,
@@ -442,6 +495,8 @@ ipcMain.handle('start-crawl', async (event, { localPath, networkPath, noLimit = 
     network: fileNetwork,
     localDirs: dirLocal,
     networkDirs: dirNetwork,
+    localSkipped: skipLocal,
+    networkSkipped: skipNetwork,
     complete: false,
     at: 0,
   };
@@ -511,7 +566,7 @@ ipcMain.handle('start-crawl', async (event, { localPath, networkPath, noLimit = 
         put(rel, 'sizeLocal', 'cntLocal', size, cnt);
         if (isFolder) dirLocal.add(rel);
         else fileLocal.set(rel, { size, mtimeMs });
-      });
+      }, skipLocal);
       if (!ok) trusted = false;
     }
     if (networkPath) {
@@ -519,12 +574,13 @@ ipcMain.handle('start-crawl', async (event, { localPath, networkPath, noLimit = 
         put(rel, 'sizeNetwork', 'cntNetwork', size, cnt);
         if (isFolder) dirNetwork.add(rel);
         else fileNetwork.set(rel, { size, mtimeMs });
-      });
+      }, skipNetwork);
       if (!ok) trusted = false;
     }
     flush();
     if (token !== crawlToken) return { ok: false, aborted: true };
     await saveIfCurrent();
+    const noAccess = skipLocal.length + skipNetwork.length;
     // Синхронизация, прошедшая за время обхода, обнуляет crawlData: приёмник
     // изменился, и собранный индекс описывает уже не то дерево. Тогда отмечать
     // нечего — план пересканирует стороны заново.
@@ -532,8 +588,10 @@ ipcMain.handle('start-crawl', async (event, { localPath, networkPath, noLimit = 
       crawlData.complete = trusted; // только полный обход годится вместо скана
       crawlData.at = Date.now();
     }
-    post('crawl-done', { scanned, ok: true, partial: !trusted });
-    return { ok: true, scanned, partial: !trusted };
+    // noAccess — не обрыв связи, а закрытые правами папки: размеры без них
+    // неполны, но это не повод звать чинить сеть. Сообщения об этом разные.
+    post('crawl-done', { scanned, ok: true, partial: !trusted, noAccess });
+    return { ok: true, scanned, partial: !trusted, noAccess };
   } catch (err) {
     // Сохраняем частичный прогресс даже при обрыве обхода — но только если
     // обход всё ещё наш: погашенному тут писать уже нечего, его место занял новый.
@@ -601,6 +659,10 @@ ipcMain.handle('preview', async (event, { localPath, networkPath, folders, exclu
       perFolder: countByFolder(plan, folders),
       totals: summarize(plan),
       destTrashable: supportsTrash(dstRoot),
+      // Закрытые правами папки: работой они не станут, но и промолчать о них
+      // нельзя — иначе ветка не синхронизируется, а отчёт объявляет «Готово».
+      skipped: (plan.skipped || []).slice(0, 20),
+      skippedTotal: (plan.skipped || []).length,
     };
   } catch (err) {
     if (err.message === 'aborted') return { aborted: true };
@@ -816,5 +878,6 @@ async function performSync(event, { localPath, networkPath, folders, excludes = 
     unrecoverable: res.unrecoverable,
     failures: res.failures.length,
     failuresSample: res.failures.slice(0, 5).map((f) => `${f.path} (${f.code})`),
+    skippedTotal: (plan.skipped || []).length,
   };
 }

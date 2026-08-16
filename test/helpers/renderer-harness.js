@@ -49,7 +49,8 @@ const EPILOGUE = `
 var __api = {
   state, toggleCheck, collectSelection, isIncluded, nodeCheckState, pruneMarks,
   onSelectAll, markKey, inheritedIncluded, hasDescendantMark, updateControls,
-  metaFor, mergeSizes, sortNodes, formatSize, escapeHtml,
+  metaFor, mergeSizes, sortNodes, formatSize, escapeHtml, historyFilesHtml,
+  lightRelistTop, isExpanded, expandKey, makeNode,
 };`;
 
 const idleApi = {

@@ -178,3 +178,64 @@ test('папки всегда выше файлов, по дате — новы�
   ]).map((n) => n.name).slice();
   assert.deepStrictEqual(byDate, ['новый', 'старый']);
 });
+
+// ---- Написание имени и опознание узла ----
+// Имя папки берётся с той стороны, что попала в список первой. Пока локальная
+// сторона недоступна, оно приходит с сетевой, а когда она возвращается — меняется
+// регистр. Отметки это переживать научились раньше, узлы дерева — нет: раскрытая
+// ветка схлопывалась, а загруженные дети выбрасывались, и так каждые шесть секунд.
+
+// Поднимает renderer с заданным листингом и даёт стартовой инициализации доцлиться:
+// init() читает настройки асинхронно, и правки состояния до её конца затирает refresh.
+async function withListing(items) {
+  const listing = { items, localOk: true, networkOk: true };
+  const api = loadRenderer({
+    getSettings: async () => ({}),
+    saveSettings: async () => {},
+    listFolders: async () => listing,
+    probe: async () => ({ localOk: true, networkOk: true }),
+    startCrawl: async () => {},
+    stopCrawl: async () => {},
+    onCrawl: () => () => {},
+    onSyncProgress: () => () => {},
+    onPreviewProgress: () => () => {},
+  });
+  await new Promise((r) => setTimeout(r, 0));
+  api.state.localPath = 'C:\local';
+  api.state.networkPath = '\\server\share';
+  return api;
+}
+
+const asDto = (name) => ({ name, relPath: name, isDir: true, hasLocal: true, hasNetwork: true, mtimeMs: 0 });
+
+test('смена написания не схлопывает раскрытую ветку и не теряет её детей', async () => {
+  const api = await withListing([asDto('Док')]);
+
+  // Ветка 'док' пришла с сетевой стороны, раскрыта, дети загружены.
+  const корень = api.makeNode(asDto('док'));
+  корень.loaded = true;
+  корень.children = [api.makeNode({ ...asDto('внутри'), relPath: 'док/внутри' })];
+  api.state.roots = [корень];
+  api.state.expanded.add(api.expandKey('док'));
+
+  // Локальная сторона вернулась — листинг отдаёт ту же папку как 'Док'.
+  await api.lightRelistTop();
+
+  assert.strictEqual(api.state.roots.length, 1);
+  assert.strictEqual(api.state.roots[0], корень, 'узел тот же, а не созданный заново');
+  assert.strictEqual(api.state.roots[0].name, 'Док', 'написание подтянулось за листингом');
+  assert.strictEqual(api.state.roots[0].loaded, true, 'загруженность не потеряна');
+  assert.strictEqual(api.state.roots[0].children.length, 1, 'дети на месте');
+  assert.strictEqual(api.isExpanded('Док'), true, 'ветка осталась раскрытой');
+});
+
+test('отметка переживает смену написания вместе с узлом', async () => {
+  const api = await withListing([asDto('Док')]);
+  api.state.roots = [api.makeNode(asDto('док'))];
+  api.toggleCheck(node('док'));
+
+  await api.lightRelistTop();
+
+  const { folders } = api.collectSelection();
+  assert.deepStrictEqual(Array.from(folders), ['Док'], 'отметка осталась и переписалась под листинг');
+});

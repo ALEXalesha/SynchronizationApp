@@ -35,28 +35,47 @@ function createLimiter(max) {
   });
 }
 
+// Коды, которыми файловая система отвечает «эту папку тебе смотреть нельзя».
+// Отличать их от прочих ошибок обязательно: закрытую папку мы обходим стороной,
+// а вот сбой чтения (нет памяти, кончились дескрипторы, оборвалась сеть) обязан
+// прервать обход с ошибкой. Молча принять такой сбой за закрытую папку значило бы
+// строить план по неполным данным.
+const DENIED_CODES = new Set(['EPERM', 'EACCES']);
+
 // Рекурсивно собирает список файлов внутри dir.
 // Возвращает массив записей { path, size, mtimeMs }, path — относительный,
 // с разделителем '/'. Символические ссылки пропускаются (не ходим по ним).
 // excludes — Set путей папок (относительно dir), которые нужно пропустить целиком.
 // onFile() — необязательный колбэк на каждый найденный файл (прогресс/отмена).
 // dirsOut — необязательный массив, куда складываются относительные пути папок.
+// skippedOut — необязательный массив, куда складываются папки, внутрь которых
+//   заглянуть не удалось из-за прав. Раньше такая папка обрывала весь обход:
+//   одна закрытая ветка (System Volume Information в корне диска, папка с чужими
+//   правами на шаре) — и предпросмотр целиком отвечал EPERM, а синхронизация
+//   не начиналась вовсе. Пустым списком её содержимое подменить нельзя: пустой
+//   источник означает «на приёмнике всё лишнее», и одна ошибка прав обернулась бы
+//   удалением живой ветки. Поэтому папку возвращаем наверх, и планировщик
+//   выбрасывает её содержимое из рассмотрения на обеих сторонах разом.
 // Файлы читаются параллельно с ограничением SCAN_CONCURRENCY.
 // Исключения приводим к нижнему регистру один раз, на входе: путь ветки мог
 // прийти с той стороны, которая пишет имя иначе, а файловая система разницы
 // не видит. Дальше рекурсия работает уже с готовым набором.
-async function scanFiles(dir, rel = '', out = [], excludes = null, onFile = null, run = null, dirsOut = null) {
+async function scanFiles(dir, rel = '', out = [], excludes = null, onFile = null, run = null, dirsOut = null, skippedOut = null) {
   const skip = excludes && !run ? new Set([...excludes].map((e) => e.toLowerCase())) : excludes;
-  return scanInto(dir, rel, out, skip, onFile, run, dirsOut);
+  return scanInto(dir, rel, out, skip, onFile, run, dirsOut, skippedOut);
 }
 
-async function scanInto(dir, rel, out, excludes, onFile, run, dirsOut) {
+async function scanInto(dir, rel, out, excludes, onFile, run, dirsOut, skippedOut) {
   const limit = run || createLimiter(SCAN_CONCURRENCY);
   let dirents;
   try {
     dirents = await limit(() => fsp.readdir(path.join(dir, rel), { withFileTypes: true }));
   } catch (err) {
     if (err.code === 'ENOENT') return out; // папки нет — пустой список
+    if (DENIED_CODES.has(err.code) && skippedOut) {
+      skippedOut.push(rel);
+      return out;
+    }
     throw err;
   }
 
@@ -68,7 +87,7 @@ async function scanInto(dir, rel, out, excludes, onFile, run, dirsOut) {
     if (dirent.name === STAGE_DIR) continue;
     if (dirent.isDirectory()) {
       if (dirsOut) dirsOut.push(childRel);
-      tasks.push(scanInto(dir, childRel, out, excludes, onFile, limit, dirsOut));
+      tasks.push(scanInto(dir, childRel, out, excludes, onFile, limit, dirsOut, skippedOut));
     } else if (dirent.isFile()) {
       tasks.push(
         limit(() => fsp.stat(path.join(dir, childRel))).then((stat) => {
@@ -122,14 +141,20 @@ async function listChildren(dir, withMtime = false) {
 // Полный рекурсивный обход дерева для подсчёта размеров.
 // Для каждого узла вызывает onEntry(relPath, isDir, size, fileCount).
 // Для файла size — размер файла, fileCount = 1. Для папки — агрегаты по вложенному.
+// skippedOut — куда складывать папки, закрытые правами: обход их не роняет,
+// но и содержимого их не знает, а по такому индексу план строить нельзя.
 // Возвращает агрегат { size, count } для переданного rel.
-async function crawlTree(root, rel, onEntry, run = null) {
+async function crawlTree(root, rel, onEntry, run = null, skippedOut = null) {
   const limit = run || createLimiter(SCAN_CONCURRENCY);
   let dirents;
   try {
     dirents = await limit(() => fsp.readdir(path.join(root, rel), { withFileTypes: true }));
   } catch (err) {
     if (err.code === 'ENOENT') return { size: 0, count: 0 };
+    if (DENIED_CODES.has(err.code) && skippedOut) {
+      skippedOut.push(rel);
+      return { size: 0, count: 0 };
+    }
     throw err;
   }
 
@@ -141,7 +166,7 @@ async function crawlTree(root, rel, onEntry, run = null) {
     const childRel = rel ? `${rel}/${d.name}` : d.name;
     if (d.isDirectory()) {
       tasks.push(
-        crawlTree(root, childRel, onEntry, limit).then(async (sub) => {
+        crawlTree(root, childRel, onEntry, limit, skippedOut).then(async (sub) => {
           await onEntry(childRel, true, sub.size, sub.count, null);
           size += sub.size;
           count += sub.count;
