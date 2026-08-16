@@ -78,8 +78,10 @@ function escapeHtml(s) {
 function formatSize(bytes) {
   if (bytes == null) return '';
   if (bytes === 0) return '0 Б';
-  const u = ['Б', 'КБ', 'МБ', 'ГБ', 'ТБ'];
-  const i = Math.floor(Math.log(bytes) / Math.log(1024));
+  const u = ['Б', 'КБ', 'МБ', 'ГБ', 'ТБ', 'ПБ'];
+  // Без ограничения сверху шкала кончается раньше числа, и размер шары
+  // на несколько петабайт печатался как «2 undefined».
+  const i = Math.min(u.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
   const v = bytes / Math.pow(1024, i);
   return `${v.toFixed(v < 10 && i > 0 ? 1 : 0)} ${u[i]}`;
 }
@@ -245,6 +247,20 @@ function updateHeads() {
   }
 }
 
+// Убирает отметки папок, которых больше нет на верхнем уровне.
+// Только по достоверному списку: недоступная сторона отдаёт пусто, и её папки
+// выглядят удалёнными. Стереть по такому списку значит потерять выбор из-за
+// одного моргнувшего соединения — а список обновляется каждые 6 секунд.
+function pruneMarks({ localOk, networkOk }) {
+  if (state.localPath && !localOk) return;
+  if (state.networkPath && !networkOk) return;
+
+  const rootNames = new Set(state.roots.map((n) => n.relPath));
+  for (const key of [...state.marks.keys()]) {
+    if (!rootNames.has(key.split('/')[0])) state.marks.delete(key);
+  }
+}
+
 // ---- Загрузка дерева ----
 async function refresh({ force = false } = {}) {
   if (!state.localPath && !state.networkPath) return;
@@ -253,9 +269,9 @@ async function refresh({ force = false } = {}) {
   state.expanded.clear();
   setStatus('busy', 'Читаю список папок…');
 
-  let items;
+  let listing;
   try {
-    items = await window.api.listFolders({
+    listing = await window.api.listFolders({
       localPath: state.localPath,
       networkPath: state.networkPath,
       relPath: '',
@@ -268,14 +284,9 @@ async function refresh({ force = false } = {}) {
   }
   if (gen !== state.scanGen) return;
 
-  state.roots = items.map(makeNode);
+  state.roots = listing.items.map(makeNode);
   invalidateRootSort();
-
-  const rootNames = new Set(state.roots.map((n) => n.relPath));
-  for (const key of [...state.marks.keys()]) {
-    const top = key.split('/')[0];
-    if (!rootNames.has(top)) state.marks.delete(key);
-  }
+  pruneMarks(listing);
 
   renderTree();
 
@@ -301,7 +312,7 @@ async function loadChildren(node) {
   node.loading = true;
   renderTree();
   try {
-    const items = await window.api.listFolders({
+    const { items } = await window.api.listFolders({
       localPath: state.localPath,
       networkPath: state.networkPath,
       relPath: node.relPath,
@@ -891,17 +902,23 @@ function setConn(dot, ok, has) {
 // обновляет присутствие папок (чинит залипшее «нет в сети»), ловит новые/удалённые.
 async function lightRelistTop() {
   if (!state.localPath && !state.networkPath) return;
-  const items = await window.api.listFolders({
+  const listing = await window.api.listFolders({
     localPath: state.localPath,
     networkPath: state.networkPath,
     relPath: '',
     needMtime: state.sort === 'date',
   });
+  // Сторона не прочиталась — её папки выглядят пропавшими. Подменять список
+  // такой половинчатой картиной нельзя: строки замигают «нет в сети», а вернуть
+  // их сможет только следующий удачный тик.
+  if (state.localPath && !listing.localOk) return;
+  if (state.networkPath && !listing.networkOk) return;
+
   const sig = (arr) =>
     arr.map((n) => `${n.relPath}:${n.hasLocal ? 1 : 0}${n.hasNetwork ? 1 : 0}`).join('|');
   const oldSig = sig(state.roots);
   const byRel = new Map(state.roots.map((n) => [n.relPath, n]));
-  state.roots = items.map((it) => {
+  state.roots = listing.items.map((it) => {
     const ex = byRel.get(it.relPath);
     if (ex) {
       ex.isDir = it.isDir;
@@ -913,12 +930,7 @@ async function lightRelistTop() {
     return makeNode(it);
   });
   invalidateRootSort();
-
-  // Убираем отметки папок, которых больше нет на верхнем уровне.
-  const rootNames = new Set(state.roots.map((n) => n.relPath));
-  for (const key of [...state.marks.keys()]) {
-    if (!rootNames.has(key.split('/')[0])) state.marks.delete(key);
-  }
+  pruneMarks(listing);
 
   if (oldSig !== sig(state.roots)) renderTree();
   else updateControls();
@@ -941,6 +953,13 @@ async function probeTick() {
       (state.localOk !== null && r.localOk !== state.localOk);
     state.networkOk = r.networkOk;
     state.localOk = r.localOk;
+
+    // Пока открыт предпросмотр, дерево под ним всё равно не видно, а вот сеть
+    // общая: refresh заново поднимет обход всех размеров той же шарой, по которой
+    // сейчас идёт копирование. Раньше моргнувшая связь этим и оборачивалась —
+    // подсчёт размеров вставал вторым потоком поперёк синхронизации. Список
+    // обновится сам, когда окно закроют: это делают обе его кнопки.
+    if (!el.modal.hidden) return;
 
     if (changed) {
       // Связь появилась/пропала — обновляем список и пересчитываем размеры.

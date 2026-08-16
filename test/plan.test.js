@@ -7,7 +7,7 @@ const fsp = fs.promises;
 const os = require('node:os');
 const path = require('node:path');
 
-const { buildRunPlan, countByFolder, ancestorsOf } = require('../src/plan');
+const { buildRunPlan, countByFolder, ancestorsOf, scanFromIndex } = require('../src/plan');
 const { scanFiles, applyPlan, STAGE_DIR } = require('../src/fsops');
 const { summarize } = require('../src/sync');
 
@@ -356,4 +356,106 @@ test('остановка на глубоком конфликте возвращ
   assert.strictEqual(res.cancelled, true);
   assert.deepStrictEqual(await treeOf(dst), before);
   assert.strictEqual(await fsp.readFile(path.join(dst, 'док/узел'), 'utf8'), 'исходный файл');
+});
+
+// ---- Скан из индекса фонового обхода ----
+// main.js строит план либо живым сканом, либо по индексу завершённого обхода.
+// Источники разные, а план обязан выходить один и тот же.
+
+const { crawlTree } = require('../src/fsops');
+
+// Собирает индекс стороны ровно так же, как это делает обработчик start-crawl.
+async function indexOf(root) {
+  const files = new Map();
+  const dirs = new Set();
+  await crawlTree(root, '', (rel, isDir, size, cnt, mtimeMs) => {
+    if (isDir) dirs.add(rel);
+    else files.set(rel, { size, mtimeMs });
+  });
+  return { files, dirs };
+}
+
+// Сканер поверх индексов — подмена liveScan в тестах.
+function indexScan(srcRoot, srcIdx, dstRoot, dstIdx) {
+  return (root, branch, excludes) =>
+    scanFromIndex(root === srcRoot ? srcIdx : dstIdx, branch, excludes || []);
+}
+
+test('scanFromIndex: исключение действует только внутри своей ветки', () => {
+  const idx = {
+    files: new Map([
+      ['док/сам.txt', { size: 1, mtimeMs: 0 }],
+      ['док/а/пропустить.txt', { size: 1, mtimeMs: 0 }],
+      ['док/а/б/вернули.txt', { size: 1, mtimeMs: 0 }],
+    ]),
+    dirs: new Set(['док', 'док/а', 'док/а/б']),
+  };
+
+  // Для ветки 'док' запрет 'док/а' действует и накрывает всё вложенное.
+  const верх = scanFromIndex(idx, 'док', ['док/а']);
+  assert.deepStrictEqual(верх.files.map((f) => f.path), ['сам.txt']);
+  assert.deepStrictEqual(верх.dirs, []);
+
+  // Для ветки 'док/а/б' тот же запрет уже не действует: отметка точнее.
+  const низ = scanFromIndex(idx, 'док/а/б', ['док/а']);
+  assert.deepStrictEqual(низ.files.map((f) => f.path), ['вернули.txt']);
+});
+
+test('scanFromIndex совпадает с живым сканом на возвращённой вложенной ветке', async () => {
+  const src = await tmpDir();
+  const dst = await tmpDir();
+  await writeFile(src, 'док/сам.txt', 'один');
+  await writeFile(src, 'док/а/пропустить.txt', 'мимо');
+  await writeFile(src, 'док/а/б/вернули.txt', 'нужен');
+
+  const folders = ['док', 'док/а/б'];
+  const excludes = ['док/а'];
+
+  const byScan = await buildRunPlan(src, dst, folders, excludes, liveScan);
+  const byIndex = await buildRunPlan(
+    src,
+    dst,
+    folders,
+    excludes,
+    indexScan(src, await indexOf(src), dst, await indexOf(dst))
+  );
+
+  const paths = (plan) => plan.copy.map((e) => e.path).sort();
+  assert.deepStrictEqual(paths(byIndex), paths(byScan));
+  assert.deepStrictEqual(paths(byIndex), ['док/а/б/вернули.txt', 'док/сам.txt']);
+  assert.deepStrictEqual(summarize(byIndex), summarize(byScan));
+});
+
+test('план по индексу и по живому скану сходится на дереве с переносом и удалением', async () => {
+  const src = await tmpDir();
+  const dst = await tmpDir();
+  await writeFile(src, 'док/новый.txt', 'новый');
+  await writeFile(src, 'док/глубже/переехал.txt', 'тело');
+  await writeFile(src, 'док/общий.txt', 'одинаково');
+  await writeFile(dst, 'док/переехал.txt', 'тело');
+  await writeFile(dst, 'док/общий.txt', 'одинаково');
+  await writeFile(dst, 'док/лишний.txt', 'убрать');
+  // Даты должны совпасть, иначе перенос не распознается.
+  const when = new Date(2020, 0, 1);
+  for (const [root, rel] of [[src, 'док/глубже/переехал.txt'], [dst, 'док/переехал.txt']]) {
+    await fsp.utimes(path.join(root, rel), when, when);
+  }
+  for (const root of [src, dst]) await fsp.utimes(path.join(root, 'док/общий.txt'), when, when);
+
+  const byScan = await buildRunPlan(src, dst, ['док'], [], liveScan);
+  const byIndex = await buildRunPlan(
+    src,
+    dst,
+    ['док'],
+    [],
+    indexScan(src, await indexOf(src), dst, await indexOf(dst))
+  );
+
+  assert.deepStrictEqual(summarize(byIndex), summarize(byScan));
+  assert.strictEqual(byIndex.moves.length, 1);
+  assert.deepStrictEqual(byIndex.dirs, byScan.dirs);
+  assert.deepStrictEqual(
+    byIndex.trash.map((e) => e.path),
+    ['док/лишний.txt']
+  );
 });

@@ -129,6 +129,36 @@ function findTypeConflicts(src, dst) {
   return out;
 }
 
+// Файлы и папки ветки из готового индекса обхода (пути — относительно ветки).
+// idx — { files: Map(rel → {size, mtimeMs}), dirs: Set(rel) } с путями от корня стороны.
+//
+// Исключения учитываем только те, что лежат внутри самой ветки. Снять отметку
+// с 'docs/a', а потом вернуть её вложенной части 'docs/a/b' — законный выбор:
+// тогда выбраны и 'docs', и 'docs/a/b', а исключено 'docs/a'. Для ветки
+// 'docs/a/b' запрет с 'docs/a' уже не действует — самая точная отметка главнее.
+// Живой скан так и работает: ему отдают исключения, пересчитанные относительно
+// ветки, и 'docs/a' до него просто не доходит. Индекс же сравнивал полные пути
+// и выбрасывал всю вложенную ветку целиком — молча, без единой ошибки, и только
+// когда фоновый обход успел досчитаться. Один и тот же выбор давал разный
+// результат в зависимости от того, включены ли размеры.
+function scanFromIndex(idx, branch, excludes) {
+  const prefix = branch ? `${branch}/` : '';
+  const inner = [...excludes].filter((ex) => ex !== branch && ex.startsWith(prefix));
+  const excluded = (rel) => inner.some((ex) => rel === ex || rel.startsWith(`${ex}/`));
+
+  const files = [];
+  const dirs = [];
+  for (const [rel, meta] of idx.files) {
+    if (!rel.startsWith(prefix) || excluded(rel)) continue;
+    files.push({ path: rel.slice(prefix.length), size: meta.size, mtimeMs: meta.mtimeMs });
+  }
+  for (const rel of idx.dirs) {
+    if (!rel.startsWith(prefix) || excluded(rel)) continue;
+    dirs.push(rel.slice(prefix.length));
+  }
+  return { files, dirs };
+}
+
 // Дописывает items в конец target. Именно циклом, а не push(...items):
 // спред раскладывает массив в аргументы вызова, а их число ограничено
 // (около 125 тысяч), и на ветке в сотни тысяч файлов слияние планов падало
@@ -197,4 +227,11 @@ function countByFolder(plan, folders) {
   return folders.map((folder) => ({ folder, summary: counts.get(folder) }));
 }
 
-module.exports = { buildRunPlan, planForBranch, countByFolder, statType, ancestorsOf };
+module.exports = {
+  buildRunPlan,
+  planForBranch,
+  countByFolder,
+  scanFromIndex,
+  statType,
+  ancestorsOf,
+};

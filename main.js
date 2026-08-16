@@ -8,7 +8,7 @@ const fsp = require('fs').promises;
 const crypto = require('crypto');
 const { summarize } = require('./src/sync');
 const { scanFiles, listChildren, crawlTree, applyPlan, restoreStage } = require('./src/fsops');
-const { buildRunPlan, countByFolder } = require('./src/plan');
+const { buildRunPlan, countByFolder, scanFromIndex } = require('./src/plan');
 const { rootsOverlap } = require('./src/paths');
 
 let mainWindow;
@@ -80,13 +80,6 @@ async function assertRootsReachable(srcRoot, dstRoot) {
 }
 
 
-function isUnderExcluded(rel, excludes) {
-  for (const ex of excludes) {
-    if (rel === ex || rel.startsWith(ex + '/')) return true;
-  }
-  return false;
-}
-
 // Возвращает индексы стороны root из завершённого обхода, или null.
 // Срок жизни у индекса тот же, что у сканов, и по той же причине: он подменяет
 // собой живой скан, а значит к вечеру описывает диск, которого уже нет. Разница
@@ -109,22 +102,7 @@ function makeScanner(onFile = null) {
 
 async function branchScan(root, branch, excludes, onFile) {
   const idx = crawlSideFor(root);
-  if (idx) {
-    const prefix = branch ? branch + '/' : '';
-    const files = [];
-    const dirs = [];
-    for (const [rel, meta] of idx.files) {
-      if (prefix && !rel.startsWith(prefix)) continue;
-      if (isUnderExcluded(rel, excludes)) continue;
-      files.push({ path: rel.slice(prefix.length), size: meta.size, mtimeMs: meta.mtimeMs });
-    }
-    for (const rel of idx.dirs) {
-      if (prefix && !rel.startsWith(prefix)) continue;
-      if (isUnderExcluded(rel, excludes)) continue;
-      dirs.push(rel.slice(prefix.length));
-    }
-    return { files, dirs };
-  }
+  if (idx) return scanFromIndex(idx, branch, excludes);
   return getScan(path.join(root, branch), branchExcludes(excludes, branch), onFile);
 }
 
@@ -317,9 +295,16 @@ ipcMain.handle('list-folders', async (_event, { localPath, networkPath, relPath 
   const localDir = localPath ? path.join(localPath, relPath) : null;
   const networkDir = networkPath ? path.join(networkPath, relPath) : null;
 
-  const [local, network] = await Promise.all([
+  // Пустой список от listChildren означает и «папка пуста», и «прочитать не вышло»:
+  // ошибку она глушит намеренно, чтобы отвалившаяся сеть не рушила весь листинг.
+  // Отличить одно от другого обязан вызывающий, иначе renderer примет моргнувшую
+  // сторону за опустевшую и сотрёт отметки выбранных папок — а их там держит
+  // пользователь, и восстановить их некому.
+  const [local, network, localOk, networkOk] = await Promise.all([
     localDir ? listChildren(localDir, needMtime) : [],
     networkDir ? listChildren(networkDir, needMtime) : [],
+    isDir(localDir),
+    isDir(networkDir),
   ]);
 
   // Объединяем детей с обеих сторон по имени, помечая присутствие, тип и дату.
@@ -344,7 +329,7 @@ ipcMain.handle('list-folders', async (_event, { localPath, networkPath, relPath 
     return a.localeCompare(b);
   });
 
-  return names.map((name) => {
+  const items = names.map((name) => {
     const m = map.get(name);
     return {
       name,
@@ -355,6 +340,8 @@ ipcMain.handle('list-folders', async (_event, { localPath, networkPath, relPath 
       mtimeMs: m.mtimeMs,
     };
   });
+
+  return { items, localOk, networkOk };
 });
 
 // Проверка доступности папок (лёгкая — один stat на сторону).
