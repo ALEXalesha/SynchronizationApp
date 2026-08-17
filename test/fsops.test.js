@@ -16,6 +16,14 @@ const {
   STAGE_DIR,
 } = require('../src/fsops');
 const { planSync, detectMoves, planDirs } = require('../src/sync');
+const { buildRunPlan } = require('../src/plan');
+
+// Сканер в том же виде, в каком его собирает main.js.
+const liveScan = async (root, branch) => {
+  const dirs = [];
+  const files = await scanFiles(path.join(root, branch), '', [], null, null, null, dirs);
+  return { files, dirs };
+};
 
 async function tmpDir() {
   return fsp.mkdtemp(path.join(os.tmpdir(), 'syncglass-'));
@@ -649,6 +657,31 @@ test('вес вызова Корзины равен числу файлов в �
     3,
     'служебная папка уезжает одним действием — вызывающий должен знать его вес'
   );
+});
+
+// Вес — это обещание вызывающему: «столько файлов покрывает этот вызов».
+// На нём главный процесс считает «удалено безвозвратно», и на сетевом приёмнике,
+// где Корзины нет вовсе, эта цифра — единственное, что человек узнает о потере.
+// Конфликт типа уезжает целой папкой, но в вес шёл одним узлом: папка с пятью
+// файлами отчитывалась как один. Занижать здесь опаснее всего: занижённый отчёт
+// выглядит спокойным ровно тогда, когда потеряно больше всего.
+test('вес учитывает содержимое папки, снятой конфликтом типа', async () => {
+  const src = await tmpDir();
+  const dst = await tmpDir();
+  // На источнике 'узел' — файл, на приёмнике — папка с пятью живыми файлами.
+  await writeFile(src, 'ветка/узел', 'на источнике это файл');
+  for (let i = 0; i < 5; i += 1) await writeFile(dst, `ветка/узел/ф${i}.txt`, 'живой файл');
+
+  const plan = await buildRunPlan(src, dst, ['ветка'], [], liveScan);
+  assert.deepStrictEqual(plan.conflicts, ['ветка/узел'], 'узел разного типа обязан быть конфликтом');
+
+  let насчитано = 0;
+  await applyPlan(src, dst, plan, async (abs, w = 1) => {
+    насчитано += w;
+    await fsp.rm(abs, { recursive: true, force: true });
+  });
+
+  assert.strictEqual(насчитано, 5, 'обещанный вес обязан сойтись с числом стёртых файлов');
 });
 
 // scanFiles намеренно не видит узлов с именем служебной папки — иначе она

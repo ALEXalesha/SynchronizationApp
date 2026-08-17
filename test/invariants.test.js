@@ -25,6 +25,8 @@ const path = require('node:path');
 const { buildRunPlan, scanFromIndex, countByFolder } = require('../src/plan');
 const { summarize } = require('../src/sync');
 const { scanFiles, crawlTree, applyPlan, restoreStage, STAGE_DIR } = require('../src/fsops');
+const { loadRenderer } = require('./helpers/renderer-harness');
+const { loadMain } = require('./helpers/main-harness');
 
 // ---- Генератор ----
 let seed = 1;
@@ -270,6 +272,25 @@ async function perturbedCopy(src, dst, rel = '') {
       // имя уже занято узлом другого типа — это тоже часть случая
     }
   }
+
+  // Лишнее на приёмнике: то, чего на источнике нет вовсе. Без этого искажённая
+  // копия оставалась подмножеством источника, план почти никогда не содержал
+  // удалений, и законы про них молчали — мутация «не писать удаления в историю»
+  // проходила зелёной.
+  const лишних = Math.floor(rnd() * 3);
+  for (let i = 0; i < лишних; i += 1) {
+    const имя = `лишнее${i}-${Math.floor(rnd() * 1000)}`;
+    try {
+      if (rnd() < 0.35) {
+        await fsp.mkdir(path.join(dst, rel, имя), { recursive: true });
+        await fsp.writeFile(path.join(dst, rel, имя, 'внутри.txt'), 'лишнее внутри лишней папки');
+      } else {
+        await fsp.writeFile(path.join(dst, rel, имя), 'этого нет на источнике');
+      }
+    } catch {
+      // имя уже занято — это тоже часть случая
+    }
+  }
 }
 
 test('предпросмотр не врёт: сумма по веткам сходится, а повтор пуст', async (t) => {
@@ -351,6 +372,183 @@ test('план по индексу обхода совпадает с плано
   }
 });
 
+// Восьмой закон. Все прочие прогоны зовут buildRunPlan с готовым списком веток
+// и исключений, то есть проверяют вторую половину пути. Первую — от клика
+// до этого списка — не проверял никто, хотя баги прошлых сессий сидели именно
+// там: узлы дерева, отметки, ключи выбора. Здесь кликают случайно и вглубь,
+// а закон сверяет две независимые вещи: что показывает строка на экране
+// (isIncluded) и что после этого действительно происходит с файлом на диске.
+test('что отмечено на экране, то и синхронизируется — и ничего сверх того', async (t) => {
+  for (let i = 1; i <= 30; i += 1) {
+    setSeed(i * 7919 + 313);
+    const base = await fsp.mkdtemp(path.join(os.tmpdir(), 'syncglass-inv-'));
+    t.after(() => fsp.rm(base, { recursive: true, force: true }).catch(() => {}));
+    const src = path.join(base, 'src');
+    const dst = path.join(base, 'dst');
+    await fsp.mkdir(src);
+    await fsp.mkdir(dst);
+    await makeDenseTree(src);
+    await perturbedCopy(src, dst);
+
+    const узлы = [...new Set([...(await allPaths(src)), ...(await allPaths(dst))])];
+    if (!узлы.length) continue;
+
+    // Клики идут и по верхнему уровню, и вглубь — как у человека, который
+    // развернул ветку и снял в ней пару галочек. Больше половины кликов нарочно
+    // приходится внутрь уже отмеченного: сам по себе случайный выбор из всего
+    // дерева давал вложенную пару «исключено, а внутри снова включено» один раз
+    // на тридцать прогонов, а весь смысл трёхпозиционного выбора именно в ней.
+    const ui = loadRenderer();
+    const верх = узлы.filter((p) => !p.includes('/'));
+    const внутри = (какие) => {
+      const отмеченные = [];
+      for (const m of ui.state.marks.values()) {
+        if (!какие || m.mark === какие) отмеченные.push(m.path.toLowerCase() + '/');
+      }
+      return узлы.filter((p) => отмеченные.some((m) => p.toLowerCase().startsWith(m)));
+    };
+    ui.toggleCheck({ relPath: pick(верх.length ? верх : узлы), isDir: true });
+    for (let k = 0; k < 14; k += 1) {
+      const бросок = rnd();
+      // Отдельно целимся внутрь уже снятого: только так рождается «исключено,
+      // а внутри снова включено» — случай, ради которого выбор и трёхпозиционный.
+      const глубже = бросок < 0.4 ? внутри('exclude') : бросок < 0.75 ? внутри(null) : [];
+      ui.toggleCheck({ relPath: pick(глубже.length ? глубже : узлы), isDir: true });
+    }
+    // Проход по одной цепочке сверху вниз. Клик по каждому предку подряд даёт
+    // чередование «включено / исключено / снова включено» гарантированно, а не
+    // по счастливой случайности: на одних случайных кликах такая пара выпадала
+    // четыре раза на тридцать прогонов, и мутация на ней не ловилась.
+    const цепочка = pick(узлы).split('/');
+    for (let d = 1; d <= цепочка.length; d += 1) {
+      ui.toggleCheck({ relPath: цепочка.slice(0, d).join('/'), isDir: true });
+    }
+    const { folders, excludes } = ui.collectSelection();
+    if (!folders.length) continue;
+
+    const доПрогона = await snap(dst);
+    const наИсточнике = await snap(src);
+    const plan = await buildRunPlan(src, dst, folders, excludes, scanner);
+    const res = await applyPlan(src, dst, plan, rmTrash);
+    assert.deepStrictEqual(res.failures, [], `прогон ${i}: ошибки на ровном месте`);
+    const после = await snap(dst);
+
+    const нарушения = [];
+    for (const [ключ, было] of наИсточнике) {
+      if (было === '/') continue;
+      const отмечен = ui.isIncluded(ключ);
+      if (отмечен && после.get(ключ) !== было) {
+        нарушения.push(`${ключ}: отмечен на экране, но на приёмнике ${JSON.stringify(после.get(ключ))}`);
+      }
+      // Неотмеченный файл приёмник обязан оставить ровно таким, каким он был:
+      // ни скопировать, ни перезаписать, ни удалить.
+      if (!отмечен && после.get(ключ) !== доПрогона.get(ключ)) {
+        нарушения.push(`${ключ}: не отмечен, а на приёмнике поменялся`);
+      }
+    }
+    for (const [ключ, было] of доПрогона) {
+      if (было === '/' || наИсточнике.has(ключ)) continue;
+      if (ui.isIncluded(ключ)) continue; // отмечен и лишний — законно в Корзину
+      if (после.get(ключ) !== было) нарушения.push(`${ключ}: не отмечен, а с приёмника пропал`);
+    }
+    assert.deepStrictEqual(
+      нарушения,
+      [],
+      `прогон ${i}: экран и диск разошлись (ветки: ${folders.join(',')}; исключения: ${excludes.join(',') || '—'})`
+    );
+  }
+});
+
+// Имитация вылета посреди работы: часть файлов остаётся лежать в служебной папке,
+// а прибраться за ними уже некому. Настоящий applyPlan так не заканчивает — он либо
+// доводит дело до конца, либо откатывает, — поэтому единственный способ получить
+// такое состояние в прогоне это сделать его руками.
+async function crashLeftovers(root) {
+  for (const rel of await allPaths(root)) {
+    if (rel === STAGE_DIR || rel.startsWith(`${STAGE_DIR}/`)) continue;
+    if (rnd() > 0.25) continue;
+    try {
+      if (!(await fsp.stat(path.join(root, rel))).isFile()) continue;
+      const parked = path.join(root, STAGE_DIR, rel);
+      await fsp.mkdir(path.dirname(parked), { recursive: true });
+      await fsp.rename(path.join(root, rel), parked);
+    } catch {
+      // не вышло отложить — этот файл просто не участвует в имитации
+    }
+  }
+}
+
+// Седьмой закон. Прогон делался один, максимум два подряд, и всегда в одну
+// сторону: последовательность «прогон туда → обрыв → прогон обратно → вылет»
+// не порождалась ничем, а служебная папка от одного запуска в руках следующего
+// держалась на единственном точечном тесте. Здесь направление, точка обрыва
+// и вылет выбираются случайно, а законов сразу три: источник не трогают никогда,
+// оборванный прогон возвращает приёмник как было, доведённый — сводит стороны.
+test('цепочка прогонов в обе стороны с обрывами и вылетами ничего не теряет', async (t) => {
+  for (let i = 1; i <= 30; i += 1) {
+    setSeed(i * 7919 + 211);
+    const { src: a, dst: b } = await build(t);
+
+    for (let step = 1; step <= 4; step += 1) {
+      const метка = `прогон ${i}, шаг ${step}`;
+      const вылет = rnd() < 0.35;
+      const доВылета = вылет ? [await snap(a), await snap(b)] : null;
+      if (вылет) await crashLeftovers(rnd() < 0.5 ? a : b);
+
+      // Так же, как это делает performSync: разбираем обе стороны, а не только
+      // приёмник. Оборвавшийся запуск мог идти в другую сторону, и тогда оригиналы
+      // лежат в том корне, который сейчас источник.
+      for (const root of [a, b]) await restoreStage(root);
+      if (доВылета) {
+        assert.deepStrictEqual(
+          [diffOf(доВылета[0], await snap(a)), diffOf(доВылета[1], await snap(b))],
+          [[], []],
+          `${метка}: разбор служебной папки не вернул отложенное на место`
+        );
+      }
+
+      const toB = rnd() < 0.5;
+      const from = toB ? a : b;
+      const to = toB ? b : a;
+      const names = new Set();
+      for (const root of [a, b]) {
+        for (const d of await fsp.readdir(root)) if (d !== STAGE_DIR) names.add(d);
+      }
+      if (names.size === 0) continue;
+
+      const былоНаИсточнике = await snap(from);
+      const былоНаПриёмнике = await snap(to);
+      const plan = await buildRunPlan(from, to, [...names], [], scanner);
+      const total = summarize(plan).total;
+
+      const stopAt = rnd() < 0.5 ? Math.floor(rnd() * (total + 1)) : total + 1;
+      let done = 0;
+      const res = await applyPlan(from, to, plan, rmTrash, () => { done += 1; }, {
+        shouldStop: () => done >= stopAt,
+      });
+
+      assert.deepStrictEqual(
+        diffOf(былоНаИсточнике, await snap(from)),
+        [],
+        `${метка}: источник изменился, а трогать его нельзя никогда`
+      );
+      if (res.cancelled) {
+        assert.deepStrictEqual(
+          diffOf(былоНаПриёмнике, await snap(to)),
+          [],
+          `${метка}: обрыв на ${stopAt}/${total} не вернул приёмник`
+        );
+      } else {
+        assert.deepStrictEqual(
+          diffOf(await snap(from), await snap(to)),
+          [],
+          `${метка}: доведённый до конца прогон не свёл стороны`
+        );
+      }
+    }
+  }
+});
+
 test('при падающих файловых операциях ни один файл не исчезает с обеих сторон', async (t) => {
   // Самый ценный закон: у приложения вся защита от потери данных построена
   // на служебной папке и журнале, а проверить её можно только отказами.
@@ -400,5 +598,88 @@ test('при падающих файловых операциях ни один 
       lost.push(`${k}: было ${JSON.stringify(v)}, стало ${JSON.stringify(after.get(k))}`);
     }
     assert.deepStrictEqual(lost, [], `прогон ${i}: файл пропал при отказах`);
+  }
+});
+
+// Девятый закон. «Предпросмотр не врёт» есть, а «история не врёт» не было:
+// запись в журнале — единственный отчёт, который переживает закрытие окна,
+// и проверялась она до сих пор только глазами. Сверяем в обе стороны: каждая
+// строка записи подтверждается диском, и каждый изменившийся файл назван
+// в записи. Односторонняя проверка ловит выдумки, но не умолчания.
+test('история не врёт: перечисленное в записи совпадает с тем, что стало с диском', async (t) => {
+  const { call } = await loadMain();
+
+  for (let i = 1; i <= 20; i += 1) {
+    setSeed(i * 7919 + 401);
+    const base = await fsp.mkdtemp(path.join(os.tmpdir(), 'syncglass-inv-'));
+    t.after(() => fsp.rm(base, { recursive: true, force: true }).catch(() => {}));
+    const src = path.join(base, 'src');
+    const dst = path.join(base, 'dst');
+    await fsp.mkdir(src);
+    await fsp.mkdir(dst);
+    await makeDenseTree(src);
+    await perturbedCopy(src, dst);
+
+    const names = new Set();
+    for (const root of [src, dst]) {
+      for (const d of await fsp.readdir(root)) if (d !== STAGE_DIR) names.add(d);
+    }
+    if (names.size === 0) continue;
+
+    const args = {
+      localPath: src, networkPath: dst,
+      folders: [...names], excludes: [], direction: 'toNetwork',
+    };
+    const до = await snap(dst);
+    const наИсточнике = await snap(src);
+    await call('clear-history');
+    const pv = await call('preview', args);
+    const res = await call('sync', args);
+    assert.ok(!res.error, `прогон ${i}: синхронизация не прошла (${res.error})`);
+    const после = await snap(dst);
+    const [запись] = await call('get-history');
+
+    if (pv.totals.total === 0) {
+      assert.strictEqual(запись, undefined, `прогон ${i}: пустой прогон оставил запись`);
+      continue;
+    }
+    assert.deepStrictEqual(
+      запись.totals,
+      {
+        move: pv.totals.move, copy: pv.totals.copy, overwrite: pv.totals.overwrite,
+        trash: pv.totals.trash, dirs: pv.totals.dirs,
+      },
+      `прогон ${i}: итоги записи разошлись с предпросмотром`
+    );
+
+    const врёт = [];
+    const названо = new Set();
+    for (const { action, path: строка } of запись.files) {
+      const пути = action === 'move' ? строка.split(' → ') : [строка];
+      for (const p of пути) названо.add(p.toLowerCase());
+      const цель = пути[пути.length - 1].toLowerCase();
+      if (action === 'trash') {
+        if (после.get(цель) === до.get(цель)) врёт.push(`${строка}: отчитались об удалении, а узел на месте`);
+      } else if (после.get(цель) === undefined) {
+        // Отдельной веткой, а не общим сравнением: у выдуманного пути «нет
+        // на приёмнике» и «нет на источнике» — это два undefined, и они сходятся.
+        врёт.push(`${строка}: отчитались о «${action}», а такого узла на приёмнике нет`);
+      } else if (после.get(цель) !== наИсточнике.get(цель)) {
+        врёт.push(`${строка}: отчитались о «${action}», а на приёмнике ${JSON.stringify(после.get(цель))}`);
+      }
+    }
+    assert.deepStrictEqual(врёт, [], `прогон ${i}: запись обещает то, чего на диске нет`);
+
+    // Обратная сторона: молчание тоже ложь. Папки в перечень не идут (они
+    // считаются отдельной строкой итогов), поэтому спрашиваем только про файлы.
+    if (запись.filesTruncated === 0) {
+      const умолчали = [];
+      for (const ключ of new Set([...до.keys(), ...после.keys()])) {
+        if (до.get(ключ) === после.get(ключ)) continue;
+        if (до.get(ключ) === '/' || после.get(ключ) === '/') continue;
+        if (!названо.has(ключ)) умолчали.push(`${ключ}: ${JSON.stringify(до.get(ключ))} → ${JSON.stringify(после.get(ключ))}`);
+      }
+      assert.deepStrictEqual(умолчали, [], `прогон ${i}: файл изменился, а в истории о нём ни слова`);
+    }
   }
 });

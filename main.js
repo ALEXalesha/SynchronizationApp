@@ -639,6 +639,28 @@ app.on('before-quit', () => {
   }
 });
 
+// Прошлый запуск мог оборваться на полпути (вылет, обрыв сети). Тогда в служебной
+// папке лежат оригиналы — возвращаем их, прежде чем считать план.
+// Разбираем обе стороны, а не только приёмник: оборвавшийся запуск мог идти
+// в другую сторону, и тогда оригиналы лежат в том корне, который сейчас источник.
+// Не разобрать их — значит принять их за пропавшие и стереть на второй стороне.
+//
+// Зовут это и запуск, и предпросмотр, и именно в таком порядке: пока разбор делал
+// один запуск, предпросмотр видел на месте отложенного файла дыру и обещал
+// скопировать его заново. Человек соглашался на одну работу, а получал другую —
+// обещанное «скопировать 1» оборачивалось «0/0 Готово».
+async function restoreBothStages(srcRoot, dstRoot) {
+  const counts = await Promise.all(
+    [srcRoot, dstRoot].map((root) => restoreStage(root).catch(() => 0))
+  );
+  const restored = counts[0] + counts[1];
+  if (restored > 0) {
+    scanCache.clear();
+    crawlData = null; // дерево изменилось — прежний индекс уже неверен
+  }
+  return restored;
+}
+
 // Предпросмотр: строит план для выбранных веток и возвращает сводку + детали.
 // folders — относительные пути папок (могут быть вложенными).
 // direction: 'toNetwork' (локально→сеть) или 'toLocal' (сеть→локально).
@@ -671,6 +693,7 @@ ipcMain.handle('preview', async (event, { localPath, networkPath, folders, exclu
 
   try {
     await assertRootsReachable(srcRoot, dstRoot);
+    await restoreBothStages(srcRoot, dstRoot);
     const plan = await buildRunPlan(srcRoot, dstRoot, folders, excludes, makeScanner(onFile));
     return {
       perFolder: countByFolder(plan, folders),
@@ -762,19 +785,7 @@ async function performSync(event, { localPath, networkPath, folders, excludes = 
     permanentDeletes += weight;
   };
 
-  // Прошлый запуск мог оборваться на полпути (вылет, обрыв сети). Тогда в служебной
-  // папке лежат оригиналы — возвращаем их, прежде чем считать текущий план.
-  // Разбираем обе стороны, а не только приёмник: оборвавшийся запуск мог идти
-  // в другую сторону, и тогда оригиналы лежат в том корне, который сейчас источник.
-  // Не разобрать их — значит принять их за пропавшие и стереть на второй стороне.
-  const restoredCounts = await Promise.all(
-    [srcRoot, dstRoot].map((root) => restoreStage(root).catch(() => 0))
-  );
-  const restored = restoredCounts[0] + restoredCounts[1];
-  if (restored > 0) {
-    scanCache.clear();
-    crawlData = null; // приёмник изменился — прежний индекс уже неверен
-  }
+  await restoreBothStages(srcRoot, dstRoot);
 
   // Скан может оборваться на полпути (сеть отвалилась после проверки корней).
   // Тогда план строить не на чем — выходим до того, как хоть что-то тронули.

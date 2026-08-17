@@ -197,13 +197,11 @@ function scanFromIndex(idx, branch, excludes) {
     prefix === '' || (rel.length > prefix.length && ciKey(rel.slice(0, prefix.length)) === pfx);
 
   const branchKey = ciKey(branch || '');
-  const inner = [...excludes]
-    .map(ciKey)
-    .filter((ex) => ex !== branchKey && ex.startsWith(pfx));
-  const excluded = (rel) => {
-    const k = ciKey(rel);
-    return inner.some((ex) => k === ex || k.startsWith(`${ex}/`));
-  };
+  // Тем же подъёмом по пути, что и закрытые правами узлы: исключений столько,
+  // сколько галочек снято в дереве, и перебор всего списка на каждый путь индекса
+  // множил их на весь обход. Заметно это только с включённым подсчётом размеров —
+  // живой скан до исключённой ветки просто не доходит.
+  const excluded = underAny([...excludes].map(ciKey).filter((ex) => ex !== branchKey && ex.startsWith(pfx)));
 
   const files = [];
   const dirs = [];

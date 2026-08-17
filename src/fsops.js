@@ -232,6 +232,24 @@ async function ensureDir(dir) {
   await fsp.mkdir(dir, { recursive: true });
 }
 
+// Сколько файлов лежит в узле. Файл — это один; папка — сумма по содержимому.
+// Прочитать не вышло — считаем за один: занизить отчёт о безвозвратном удалении
+// хуже, чем завысить, а разбираться в причине здесь уже не с чем.
+async function countFiles(abs) {
+  let dirents;
+  try {
+    dirents = await fsp.readdir(abs, { withFileTypes: true });
+  } catch {
+    return 1;
+  }
+  let n = 0;
+  for (const d of dirents) {
+    if (d.isSymbolicLink()) continue;
+    n += d.isDirectory() ? await countFiles(path.join(abs, d.name)) : 1;
+  }
+  return n;
+}
+
 // Сколько байт сверяем с каждого конца, когда файл крупный. Мелкий читается
 // целиком: именно мелкие файлы (config.json, __init__.py, метки) чаще всего
 // и совпадают по имени с размером, будучи совершенно разными.
@@ -555,6 +573,11 @@ async function applyPlan(srcRoot, dstRoot, plan, trashFn, onProgress = () => {},
   // Их откат не вернёт, поэтому число видно снаружи.
   let unrecoverable = 0;
 
+  // Сколько файлов покрывает один отложенный узел. Обычно ровно один, и только
+  // конфликт типа уезжает целой веткой — см. doConflict.
+  const parkedWeight = new Map();
+  const weightOf = (rel) => (parkedWeight.has(rel) ? parkedWeight.get(rel) : 1);
+
   // Оригиналы, застрявшие в служебной папке: отложены, заменить не вышло, вернуть
   // на место — тоже (путь занят, файл держат открытым). В журнал они не попадают,
   // а в конце работы служебная папка уезжает в Корзину целиком — вместе с ними,
@@ -621,13 +644,20 @@ async function applyPlan(srcRoot, dstRoot, plan, trashFn, onProgress = () => {},
   // тем же путём, что и остальные оригиналы: в служебную папку, поэтому остановка
   // возвращает его на место, а Корзину он увидит только в самом конце.
   const doConflict = async (rel) => {
+    // Считаем содержимое до того, как узел тронут. Конфликт — единственное место,
+    // где в служебную папку уезжает не файл, а целая ветка: всё остальное в plan
+    // приходит из скана по файлам и весит ровно единицу. Без этого счёта папка
+    // на пять файлов отчитывалась как один безвозвратно удалённый, а на сетевом
+    // приёмнике, где Корзины нет, это единственная цифра о потере.
+    const вес = await countFiles(path.join(dstRoot, rel));
+    parkedWeight.set(rel, вес);
     try {
       await stash(rel);
       journal.conflict.push(rel);
     } catch {
       // Отложить не вышло — убираем сразу, вернуть будет нечем.
       try {
-        await trashFn(path.join(dstRoot, rel));
+        await trashFn(path.join(dstRoot, rel), вес);
         unrecoverable += 1;
       } catch (err) {
         fail('trash', rel, err);
@@ -690,13 +720,16 @@ async function applyPlan(srcRoot, dstRoot, plan, trashFn, onProgress = () => {},
   let trashed = 0;
   const parked = [...journal.stage, ...journal.overwrite, ...journal.conflict];
   const parkedCount = parked.length;
+  // Узлов и файлов тут разное число: узел, снятый конфликтом типа, — это папка.
+  // Решение «есть ли что выбрасывать» принимаем по узлам, а вес обещаем по файлам.
+  const parkedFiles = parked.reduce((n, rel) => n + weightOf(rel), 0);
   if (parkedCount > 0) {
     if (orphans.length === 0) {
       try {
         // Вес вызова передаём явно: одним действием уезжает всё содержимое
         // папки, и без него один безвозвратно удалённый файл в отчёте выглядел
         // бы так же, как весь запуск мимо Корзины.
-        await trashFn(stageRoot, parkedCount);
+        await trashFn(stageRoot, parkedFiles);
         trashed = parkedCount;
       } catch (err) {
         // Выбросить не удалось — служебную папку оставляем как есть.
@@ -713,7 +746,7 @@ async function applyPlan(srcRoot, dstRoot, plan, trashFn, onProgress = () => {},
       // со следующим запуском — как будто их и не удаляли.
       await runPool(parked, APPLY_CONCURRENCY, async (rel) => {
         try {
-          await trashFn(path.join(stageRoot, rel));
+          await trashFn(path.join(stageRoot, rel), weightOf(rel));
           trashed += 1;
         } catch (err) {
           fail('trash', rel, err);

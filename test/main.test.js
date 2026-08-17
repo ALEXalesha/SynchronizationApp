@@ -11,6 +11,7 @@ const fsp = fs.promises;
 const path = require('node:path');
 
 const { loadMain, tmpDir, writeFile, snapshot } = require('./helpers/main-harness');
+const { STAGE_DIR } = require('../src/fsops');
 
 // main.js держит состояние (кеши, токены, замок синхронизации) в модуле,
 // поэтому поднимаем его один раз на файл — как и в живом приложении.
@@ -288,6 +289,69 @@ test('файл на месте папки-предка не срывает си�
 
   const again = await call('preview', args);
   assert.strictEqual(again.totals.total, 0, 'повтор не должен упираться в то же место');
+});
+
+// Прошлый запуск мог вылететь, оставив оригиналы в служебной папке приёмника.
+// Синхронизация разбирает её первым делом, а предпросмотр — нет: он видел дыру
+// на месте отложенного файла и обещал скопировать его заново. Пользователь
+// соглашался на одну работу, а получал другую: «1 скопировать» превращалось
+// в «0/0 Готово». Два разных взгляда на одно дерево — то же расхождение,
+// что между живым сканом и индексом обхода.
+test('предпросмотр разбирает служебную папку так же, как это делает запуск', async () => {
+  const { call } = await ready;
+  const local = await tmpDir();
+  const network = await tmpDir();
+  await writeFile(local, 'док/важное.txt', 'ценные данные');
+  await writeFile(network, 'док/важное.txt', 'ценные данные');
+
+  // Вылет посреди прошлого запуска: оригинал так и лежит в служебной папке.
+  await fsp.mkdir(path.join(network, `${STAGE_DIR}/док`), { recursive: true });
+  await fsp.rename(
+    path.join(network, 'док/важное.txt'),
+    path.join(network, `${STAGE_DIR}/док/важное.txt`)
+  );
+
+  const args = { localPath: local, networkPath: network, folders: ['док'], excludes: [], direction: 'toNetwork' };
+  const pv = await call('preview', args);
+  assert.strictEqual(pv.totals.total, 0, 'отложенный оригинал на месте — работы нет');
+  assert.strictEqual(
+    fs.readFileSync(path.join(network, 'док/важное.txt'), 'utf8'),
+    'ценные данные',
+    'оригинал вернулся на своё место'
+  );
+
+  const res = await call('sync', args);
+  assert.strictEqual(res.total, pv.totals.total, 'обещали ровно столько, сколько сделали');
+});
+
+// История — единственный отчёт, который переживает закрытие окна, и перечислять
+// она обязана сделанное, а не задуманное. Осечки отсеиваются по паре
+// «действие + путь», но путь перемещения лежит в `to`, а не в `path`.
+test('провалившееся перемещение не попадает в историю как сделанное', async () => {
+  const { call } = await ready;
+  const local = await tmpDir();
+  const network = await tmpDir();
+  await writeFile(local, 'док/новая-папка/файл.txt', 'один и тот же текст');
+  await writeFile(network, 'док/старая-папка/файл.txt', 'один и тот же текст');
+  const когда = new Date(2020, 0, 1);
+  await fsp.utimes(path.join(local, 'док/новая-папка/файл.txt'), когда, когда);
+  await fsp.utimes(path.join(network, 'док/старая-папка/файл.txt'), когда, когда);
+
+  const args = { localPath: local, networkPath: network, folders: ['док'], excludes: [], direction: 'toNetwork' };
+  const pv = await call('preview', args);
+  assert.strictEqual(pv.totals.move, 1, 'пара имён обязана опознаться как перенос');
+
+  // Место назначения занимает непустая папка — уже после того, как её увидел
+  // предпросмотр. Переименовать в неё нельзя, и запасное копирование туда же
+  // тоже не проходит: applyPlan отчитается об осечке.
+  await writeFile(network, 'док/новая-папка/файл.txt/чужое', 'занято');
+
+  await call('clear-history');
+  const res = await call('sync', args);
+  assert.strictEqual(res.failures, 1, 'перемещение обязано провалиться');
+
+  const [запуск] = await call('get-history');
+  assert.deepStrictEqual(запуск.files, [], 'в истории не место тому, чего не сделали');
 });
 
 // Направление «сеть → локально» — вторая половина приложения, и до сих пор
