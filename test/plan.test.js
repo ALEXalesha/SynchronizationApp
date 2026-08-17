@@ -610,6 +610,73 @@ test('общий конфликтный предок двух веток уби�
   assert.deepStrictEqual(await treeOf(dst), ['a/', 'a/b/', 'a/b/один.txt', 'a/c/', 'a/c/два.txt']);
 });
 
+test('файл, закрытый правами на источнике, не уводит копию с приёмника в Корзину', async () => {
+  // Скан отдал этот файл отдельным списком: он есть, но размера мы не знаем.
+  // Раньше выбывание работало только для папок — по вложенным путям, — и файл,
+  // названный целиком, не отсекал сам себя. На приёмнике он выглядел лишним.
+  const src = await tmpDir();
+  const dst = await tmpDir();
+  await writeFile(src, 'данные/открытый.txt', 'o');
+  await writeFile(dst, 'данные/открытый.txt', 'o');
+  await writeFile(dst, 'данные/закрытый.txt', 'z');
+
+  const scanner = async (root, branch, excludes) => {
+    const side = await liveScan(root, branch, excludes);
+    if (root !== src) return side;
+    return {
+      files: side.files.filter((e) => e.path !== 'закрытый.txt'),
+      dirs: side.dirs,
+      skipped: ['закрытый.txt'],
+    };
+  };
+
+  const plan = await buildRunPlan(src, dst, ['данные'], [], scanner);
+
+  assert.deepStrictEqual(plan.trash, [], 'закрытый файл не считается лишним на приёмнике');
+  assert.deepStrictEqual(plan.copy, []);
+  assert.deepStrictEqual(plan.skipped, ['данные/закрытый.txt']);
+
+  await applyPlan(src, dst, plan, mockTrash);
+  assert.strictEqual(await fsp.readFile(path.join(dst, 'данные/закрытый.txt'), 'utf8'), 'z');
+});
+
+test('счётчики по веткам не платят произведением веток на файлы', async () => {
+  // «Выбрать все» на папке с тысячами узлов верхнего уровня — законный сценарий:
+  // отметки живут отдельно от строк и покрывают даже непоказанные. Перебор всех
+  // веток на каждый путь давал произведение: 5000 веток на 100 тысяч файлов —
+  // это пять с половиной секунд замершего главного процесса ровно между сканом
+  // и появлением предпросмотра. Ветка ищется подъёмом по пути, и цена линейна.
+  const folders = [];
+  const copy = [];
+  for (let i = 0; i < 5000; i += 1) {
+    folders.push(`ветка${i}`);
+    for (let j = 0; j < 20; j += 1) copy.push({ path: `ветка${i}/файл${j}.txt`, size: 1, mtimeMs: 0 });
+  }
+  const plan = {
+    copy,
+    overwrite: [],
+    trash: [],
+    unchanged: [],
+    moves: [],
+    conflicts: [],
+    dirs: { create: folders.slice(), remove: [] },
+  };
+
+  const started = Date.now();
+  const perFolder = countByFolder(plan, folders);
+  const spent = Date.now() - started;
+
+  assert.strictEqual(perFolder.length, 5000);
+  assert.strictEqual(perFolder[0].summary.copy, 20);
+  assert.strictEqual(perFolder[0].summary.dirs, 1);
+  assert.strictEqual(
+    perFolder.reduce((n, pf) => n + pf.summary.copy, 0),
+    copy.length,
+    'ни один путь не потерялся'
+  );
+  assert.ok(spent < 2000, `счётчики заняли ${spent} мс — похоже на перебор всех веток`);
+});
+
 test('остановка возвращает на место файл, снятый конфликтом в предке', async () => {
   const src = await tmpDir();
   const dst = await tmpDir();

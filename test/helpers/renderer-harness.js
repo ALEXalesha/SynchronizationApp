@@ -50,7 +50,7 @@ var __api = {
   state, toggleCheck, collectSelection, isIncluded, nodeCheckState, pruneMarks,
   onSelectAll, markKey, inheritedIncluded, hasDescendantMark, updateControls,
   metaFor, mergeSizes, sortNodes, formatSize, escapeHtml, historyFilesHtml,
-  lightRelistTop, isExpanded, expandKey, makeNode,
+  lightRelistTop, isExpanded, expandKey, makeNode, renderPreview, el,
 };`;
 
 const idleApi = {
@@ -106,6 +106,10 @@ function loadRenderer(api = idleApi) {
   // Приводим к массивам этого контекста прямо на границе.
   return {
     ...inner,
+    // Сам контекст: функции верхнего уровня renderer.js лежат на нём свойствами,
+    // поэтому их можно подменить и проследить, что вызов действительно был.
+    // Иначе «перерисовалось ли дерево» изнутри теста никак не увидеть.
+    __ctx: ctx,
     collectSelection: () => {
       const { folders, excludes } = inner.collectSelection();
       return { folders: Array.from(folders), excludes: Array.from(excludes) };

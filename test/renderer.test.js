@@ -138,6 +138,102 @@ test('состояние узлов вокруг глубокого исключ
   assert.strictEqual(api.isIncluded('п/q/r/s/глубже.txt'), false);
 });
 
+// Опознание «внутри есть отметки» рисует чёрточку у каждой строки, и раньше оно
+// перебирало все отметки на каждую строку. Два предела перемножались: «Выбрать
+// все» на папке с 30 тысячами узлов и 500 строк на экране давали треть секунды
+// на перерисовку, а во время фонового обхода дерево перерисовывается раз в 400 мс.
+test('чёрточки не платят произведением строк на отметки', () => {
+  const { api } = fresh();
+  const roots = [];
+  for (let i = 0; i < 30000; i += 1) roots.push(node(`снимок${i}.jpg`, false));
+  api.state.roots = roots;
+  api.onSelectAll({ target: { checked: true } });
+
+  const started = Date.now();
+  for (let i = 0; i < 500; i += 1) api.nodeCheckState(`снимок${i}.jpg`);
+  const spent = Date.now() - started;
+
+  assert.strictEqual(api.nodeCheckState('снимок0.jpg'), 'checked');
+  assert.ok(spent < 100, `500 строк заняли ${spent} мс — похоже на перебор всех отметок`);
+});
+
+// Ответ на «есть ли отметки внутри» теперь считается один раз и запоминается,
+// поэтому каждая правка отметок обязана этот ответ сбрасывать. Пропущенный сброс
+// показал бы чёрточку там, где выбора уже нет, и наоборот.
+test('запомненный ответ про отметки внутри сбрасывается на каждой правке', () => {
+  const { api } = fresh();
+  api.state.roots = [node('док'), node('фото')];
+
+  assert.strictEqual(api.hasDescendantMark('док'), false);
+  api.toggleCheck(node('док'));
+  api.toggleCheck(node('док/архив'));
+  assert.strictEqual(api.hasDescendantMark('док'), true, 'исключение внутри — уже не чистая ветка');
+  assert.strictEqual(api.nodeCheckState('док'), 'partial');
+
+  // Клик по «частичному» узлу стирает вложенные отметки и ставит свою — число
+  // отметок при этом не меняется, так что на размер тут полагаться нельзя.
+  api.toggleCheck(node('док'));
+  assert.strictEqual(api.hasDescendantMark('док'), false);
+  assert.strictEqual(api.nodeCheckState('док'), 'checked');
+
+  api.onSelectAll({ target: { checked: true } });
+  assert.strictEqual(api.hasDescendantMark('док'), false);
+
+  api.toggleCheck(node('док/архив'));
+  assert.strictEqual(api.hasDescendantMark('док'), true);
+
+  // pruneMarks подменяет карту целиком — запомненный ответ обязан слететь и тут.
+  api.state.roots = [node('фото')];
+  api.pruneMarks({ localOk: true, networkOk: true });
+  assert.strictEqual(api.hasDescendantMark('док'), false, 'папки больше нет — и отметок внутри нет');
+});
+
+// Список веток в предпросмотре строился по строке на каждую отмеченную ветку.
+// «Выбрать все» на папке с 30 тысячами узлов давал 30 тысяч строк разметки одним
+// innerHTML — то же, на чём когда-то вставало окно истории. Причём почти все они
+// говорили «без изменений», то есть не сообщали ничего.
+function previewOf(perFolder) {
+  const { api } = fresh();
+  api.renderPreview({
+    perFolder,
+    totals: { move: 0, copy: 1, overwrite: 0, trash: 0, unchanged: 0, dirs: 0, total: 1 },
+    destTrashable: true,
+  });
+  return api.el.previewList.innerHTML;
+}
+
+const idleFolder = (name) => ({
+  folder: name,
+  summary: { move: 0, copy: 0, overwrite: 0, trash: 0, unchanged: 3, dirs: 0, total: 0 },
+});
+const busyFolder = (name) => ({
+  folder: name,
+  summary: { move: 0, copy: 2, overwrite: 0, trash: 0, unchanged: 0, dirs: 0, total: 2 },
+});
+
+test('короткий список веток показывается целиком, как и раньше', () => {
+  const html = previewOf([busyFolder('док'), idleFolder('фото'), idleFolder('музыка')]);
+  assert.match(html, /док/);
+  assert.match(html, /фото/);
+  assert.match(html, /музыка/);
+  assert.match(html, /без изменений/);
+});
+
+test('на тысячах веток список сворачивается, а не строит строку на каждую', () => {
+  const perFolder = [busyFolder('нужная'), busyFolder('тоже-нужная')];
+  for (let i = 0; i < 5000; i += 1) perFolder.push(idleFolder(`пустая${i}`));
+
+  const html = previewOf(perFolder);
+  const rows = (html.match(/<li>/g) || []).length;
+
+  assert.ok(rows < 600, `строк ${rows} — список не свернулся`);
+  assert.match(html, /нужная/, 'ветки с работой показываются в первую очередь');
+  assert.match(html, /тоже-нужная/);
+  // Разряды в ru-RU разделяются неразрывным пробелом, поэтому сверяем нормализованно.
+  assert.match(html.replace(/\s/g, ' '), /5 000 без изменений/, 'о свёрнутых сказано числом');
+  assert.doesNotMatch(html, /пустая4999/);
+});
+
 test('размер строки находится при другом написании пути', () => {
   const { api } = fresh();
   const n = { relPath: 'Док', name: 'Док', isDir: true, hasLocal: true, hasNetwork: false };
@@ -227,6 +323,29 @@ test('смена написания не схлопывает раскрытую
   assert.strictEqual(api.state.roots[0].loaded, true, 'загруженность не потеряна');
   assert.strictEqual(api.state.roots[0].children.length, 1, 'дети на месте');
   assert.strictEqual(api.isExpanded('Док'), true, 'ветка осталась раскрытой');
+});
+
+test('смена написания перерисовывает строку, а не только модель', async () => {
+  // Признак «список изменился» собирался из ключа без учёта регистра и пометок
+  // присутствия, а подпись строки в него не входила. Написание в модели
+  // обновлялось, перерисовки не было, и на экране оставалось прежнее имя.
+  const api = await withListing([asDto('Док')]);
+  api.state.roots = [api.makeNode(asDto('док'))];
+
+  let renders = 0;
+  const real = api.__ctx.renderTree;
+  api.__ctx.renderTree = () => {
+    renders += 1;
+    return real();
+  };
+
+  await api.lightRelistTop();
+  assert.strictEqual(api.state.roots[0].name, 'Док');
+  assert.strictEqual(renders, 1, 'подпись строки изменилась — дерево обязано перерисоваться');
+
+  // Второй тик ничего не меняет: лишних перерисовок каждые 6 секунд быть не должно.
+  await api.lightRelistTop();
+  assert.strictEqual(renders, 1);
 });
 
 test('отметка переживает смену написания вместе с узлом', async () => {

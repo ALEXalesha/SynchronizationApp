@@ -366,17 +366,18 @@ ipcMain.handle('list-folders', async (_event, { localPath, networkPath, relPath 
   const localDir = localPath ? path.join(localPath, relPath) : null;
   const networkDir = networkPath ? path.join(networkPath, relPath) : null;
 
-  // Пустой список от listChildren означает и «папка пуста», и «прочитать не вышло»:
-  // ошибку она глушит намеренно, чтобы отвалившаяся сеть не рушила весь листинг.
-  // Отличить одно от другого обязан вызывающий, иначе renderer примет моргнувшую
-  // сторону за опустевшую и сотрёт отметки выбранных папок — а их там держит
-  // пользователь, и восстановить их некому.
-  const [local, network, localOk, networkOk] = await Promise.all([
-    localDir ? listChildren(localDir, needMtime) : [],
-    networkDir ? listChildren(networkDir, needMtime) : [],
-    isDir(localDir),
-    isDir(networkDir),
+  // Достоверность списка берём у самой listChildren: она отвечает ok=false, если
+  // прочитать папку не удалось. Раньше это выяснялось отдельным stat — а stat
+  // по закрытой правами папке проходит, тогда как readdir нет, и нечитаемая
+  // сторона выдавалась за доступную и опустевшую. Renderer по такому ответу
+  // считал список достоверным и стирал отметки выбранных папок; список
+  // обновляется каждые 6 секунд, так что одна осечка чтения уносила весь выбор.
+  const [local, network] = await Promise.all([
+    localDir ? listChildren(localDir, needMtime) : { items: [], ok: false },
+    networkDir ? listChildren(networkDir, needMtime) : { items: [], ok: false },
   ]);
+  const localOk = local.ok;
+  const networkOk = network.ok;
 
   // Объединяем детей с обеих сторон по имени, помечая присутствие, тип и дату.
   // Ключ — имя без учёта регистра: файловая система не различает 'Docs' и 'docs',
@@ -395,8 +396,8 @@ ipcMain.handle('list-folders', async (_event, { localPath, networkPath, relPath 
       map.set(key, m);
     }
   };
-  merge(local, 'hasLocal');
-  merge(network, 'hasNetwork');
+  merge(local.items, 'hasLocal');
+  merge(network.items, 'hasNetwork');
 
   // Сортировка: сначала папки, потом файлы; внутри — по имени.
   const merged = [...map.values()].sort((A, B) => {

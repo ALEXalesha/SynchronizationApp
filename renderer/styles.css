@@ -676,6 +676,12 @@ input[type="checkbox"]:indeterminate::after {
   white-space: nowrap;
   flex-shrink: 0;
 }
+/* Итоговая строка под списком веток: сколько их свернулось. */
+.preview-list .pv-more {
+  color: rgba(223, 227, 232, 0.32);
+  font-size: 12px;
+  font-style: italic;
+}
 
 .progress-wrap {
   display: flex;

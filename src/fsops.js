@@ -42,14 +42,31 @@ function createLimiter(max) {
 // строить план по неполным данным.
 const DENIED_CODES = new Set(['EPERM', 'EACCES']);
 
+// Что делать, если stat по файлу не удался. readdir только что показал этот файл,
+// но живая папка меняется под руками: временные файлы, кеш браузера, сборка.
+// Раньше любая осечка stat обрывала весь скан — предпросмотр отвечал «не удалось
+// прочитать папки» из-за одного исчезнувшего файла, а синхронизация не начиналась.
+//   'gone'  — файла действительно нет, отсутствие в списке и есть правда;
+//   'blind' — есть, но размера не знаем: молча выбросить нельзя, пустое место
+//             на источнике означает «на приёмнике лишнее», и копия уехала бы
+//             в Корзину. Отдаём наверх тем же списком, что и закрытые папки;
+//   иначе   — сбой чтения (нет дескрипторов, оборвалась сеть) обязан прервать
+//             обход: строить план по неполным данным опаснее, чем не строить.
+function fileStatVerdict(err, skippedOut) {
+  if (err.code === 'ENOENT') return 'gone';
+  if (DENIED_CODES.has(err.code) && skippedOut) return 'blind';
+  return 'fatal';
+}
+
 // Рекурсивно собирает список файлов внутри dir.
 // Возвращает массив записей { path, size, mtimeMs }, path — относительный,
 // с разделителем '/'. Символические ссылки пропускаются (не ходим по ним).
 // excludes — Set путей папок (относительно dir), которые нужно пропустить целиком.
 // onFile() — необязательный колбэк на каждый найденный файл (прогресс/отмена).
 // dirsOut — необязательный массив, куда складываются относительные пути папок.
-// skippedOut — необязательный массив, куда складываются папки, внутрь которых
-//   заглянуть не удалось из-за прав. Раньше такая папка обрывала весь обход:
+// skippedOut — необязательный массив, куда складывается то, что закрыто правами:
+//   папки, внутрь которых заглянуть не дали, и отдельные файлы, у которых
+//   не читается даже размер. Раньше такая папка обрывала весь обход:
 //   одна закрытая ветка (System Volume Information в корне диска, папка с чужими
 //   правами на шаре) — и предпросмотр целиком отвечал EPERM, а синхронизация
 //   не начиналась вовсе. Пустым списком её содержимое подменить нельзя: пустой
@@ -90,10 +107,20 @@ async function scanInto(dir, rel, out, excludes, onFile, run, dirsOut, skippedOu
       tasks.push(scanInto(dir, childRel, out, excludes, onFile, limit, dirsOut, skippedOut));
     } else if (dirent.isFile()) {
       tasks.push(
-        limit(() => fsp.stat(path.join(dir, childRel))).then((stat) => {
-          out.push({ path: childRel, size: stat.size, mtimeMs: stat.mtimeMs });
-          if (onFile) onFile();
-        })
+        limit(() => fsp.stat(path.join(dir, childRel))).then(
+          (stat) => {
+            out.push({ path: childRel, size: stat.size, mtimeMs: stat.mtimeMs });
+            if (onFile) onFile();
+          },
+          // Обработчик именно вторым аргументом then, а не отдельным catch: catch
+          // поймал бы и 'aborted', который бросает onFile при отмене предпросмотра,
+          // и отмена утонула бы вместе с ошибками файлов.
+          (err) => {
+            const verdict = fileStatVerdict(err, skippedOut);
+            if (verdict === 'blind') skippedOut.push(childRel);
+            else if (verdict === 'fatal') throw err;
+          }
+        )
       );
     }
   }
@@ -102,7 +129,13 @@ async function scanInto(dir, rel, out, excludes, onFile, run, dirsOut, skippedOu
 }
 
 // Прямые дети папки: и подпапки, и файлы (без рекурсии).
-// Возвращает [{ name, isDir, mtimeMs }].
+// Возвращает { items: [{ name, isDir, mtimeMs }], ok }.
+// ok=false — прочитать папку не удалось (нет её, нет прав, оборвалась сеть).
+// Без этого флага пустой список означал сразу две разные вещи: «папка пуста»
+// и «прочитать не вышло». Вызывающий разбирал их отдельным stat, но stat —
+// другой системный вызов: по закрытой правами папке он проходит, а readdir нет,
+// и нечитаемая сторона выдавалась за доступную и опустевшую. Интерфейс по такому
+// ответу стирал отметки выбранных папок, а держал их там пользователь.
 // withMtime=false — только readdir (быстро, без stat по каждому; дата = 0).
 // withMtime=true — дополнительно stat по каждому ребёнку (для сортировки по дате),
 // параллельно. Нужно только когда выбрана сортировка по дате.
@@ -111,9 +144,9 @@ async function listChildren(dir, withMtime = false) {
   try {
     dirents = await fsp.readdir(dir, { withFileTypes: true });
   } catch {
-    // Папки нет или сторона недоступна (сеть отвалилась) — показываем пусто,
-    // а не рушим весь листинг. Доступность отражают индикаторы связи.
-    return [];
+    // Ошибку не бросаем: отвалившаяся сторона не должна рушить весь листинг,
+    // а вторая сторона по-прежнему годится к показу.
+    return { items: [], ok: false };
   }
 
   const kids = dirents.filter(
@@ -122,20 +155,20 @@ async function listChildren(dir, withMtime = false) {
 
   if (!withMtime) {
     // Быстрый путь: одна readdir, без обращений к каждому файлу.
-    return kids.map((d) => ({ name: d.name, isDir: d.isDirectory(), mtimeMs: 0 }));
+    return { items: kids.map((d) => ({ name: d.name, isDir: d.isDirectory(), mtimeMs: 0 })), ok: true };
   }
 
   const limit = createLimiter(SCAN_CONCURRENCY);
-  const out = [];
+  const items = [];
   const tasks = kids.map((d) => {
     const isDir = d.isDirectory();
     return limit(() => fsp.stat(path.join(dir, d.name))).then(
-      (st) => out.push({ name: d.name, isDir, mtimeMs: st.mtimeMs }),
-      () => out.push({ name: d.name, isDir, mtimeMs: 0 }) // stat не удался — всё равно показываем
+      (st) => items.push({ name: d.name, isDir, mtimeMs: st.mtimeMs }),
+      () => items.push({ name: d.name, isDir, mtimeMs: 0 }) // stat не удался — всё равно показываем
     );
   });
   await Promise.all(tasks);
-  return out;
+  return { items, ok: true };
 }
 
 // Полный рекурсивный обход дерева для подсчёта размеров.
@@ -174,11 +207,20 @@ async function crawlTree(root, rel, onEntry, run = null, skippedOut = null) {
       );
     } else if (d.isFile()) {
       tasks.push(
-        limit(() => fsp.stat(path.join(root, childRel))).then(async (st) => {
-          await onEntry(childRel, false, st.size, 1, st.mtimeMs);
-          size += st.size;
-          count += 1;
-        })
+        limit(() => fsp.stat(path.join(root, childRel))).then(
+          async (st) => {
+            await onEntry(childRel, false, st.size, 1, st.mtimeMs);
+            size += st.size;
+            count += 1;
+          },
+          // Вторым аргументом, а не catch: onEntry бросает 'aborted' и 'toobig',
+          // и погасить обход эти броски обязаны по-прежнему.
+          (err) => {
+            const verdict = fileStatVerdict(err, skippedOut);
+            if (verdict === 'blind') skippedOut.push(childRel);
+            else if (verdict === 'fatal') throw err;
+          }
+        )
       );
     }
   }

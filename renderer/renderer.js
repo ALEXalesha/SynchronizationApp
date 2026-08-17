@@ -136,12 +136,50 @@ function isIncluded(relPath) {
   if (m) return m.mark === 'include';
   return inheritedIncluded(relPath);
 }
-function hasDescendantMark(relPath) {
-  const prefix = markKey(relPath) + '/';
+// Все правки отметок идут через эти три функции: ниже на них построен запомненный
+// ответ про «внутри есть отметки», и обойди его хоть одна правка напрямую — дерево
+// рисовало бы чёрточки по устаревшему снимку выбора.
+let markParents = null;
+function markMutated() {
+  markParents = null;
+}
+function setMark(key, entry) {
+  state.marks.set(key, entry);
+  markMutated();
+}
+function deleteMark(key) {
+  state.marks.delete(key);
+  markMutated();
+}
+function replaceMarks(next) {
+  state.marks = next;
+  markMutated();
+}
+
+// Ключи всех папок, внутри которых лежит хоть одна отметка. Раньше на этот вопрос
+// отвечал перебор всех отметок, и перебор шёл на каждую нарисованную строку —
+// два предела перемножались. «Выбрать все» на папке с 30 тысячами узлов и 500
+// строк на экране давали треть секунды на перерисовку, а во время фонового обхода
+// дерево перерисовывается раз в 400 мс: окно почти стояло. Цепочки родителей
+// размечаются один раз на правку выбора, а не заново на каждую строку.
+function markParentKeys() {
+  if (markParents) return markParents;
+  markParents = new Set();
   for (const k of state.marks.keys()) {
-    if (k.startsWith(prefix)) return true;
+    let cut = k.lastIndexOf('/');
+    while (cut > 0) {
+      const parent = k.slice(0, cut);
+      // Выше уже размечено этой же цепочкой: кто занял предка, тот дошёл до корня.
+      if (markParents.has(parent)) break;
+      markParents.add(parent);
+      cut = parent.lastIndexOf('/');
+    }
   }
-  return false;
+  return markParents;
+}
+
+function hasDescendantMark(relPath) {
+  return markParentKeys().has(markKey(relPath));
 }
 function nodeCheckState(relPath) {
   if (hasDescendantMark(relPath)) return 'partial';
@@ -221,7 +259,7 @@ async function pickFolder(side) {
   if (!dir) return;
   setPath(side, dir);
   state.sizeMap.clear(); // путь сменился — старые размеры больше не годятся
-  state.marks.clear();
+  replaceMarks(new Map());
   persist();
   await refresh({ force: true });
 }
@@ -294,7 +332,7 @@ function pruneMarks({ localOk, networkOk }) {
     const relPath = actual + entry.path.slice(head.length);
     kept.set(markKey(relPath), { path: relPath, mark: entry.mark });
   }
-  state.marks = kept;
+  replaceMarks(kept);
 }
 
 // ---- Загрузка дерева ----
@@ -397,10 +435,10 @@ function toggleCheck(node) {
 
   const prefix = key + '/';
   for (const k of [...state.marks.keys()]) {
-    if (k !== key && k.startsWith(prefix)) state.marks.delete(k);
+    if (k !== key && k.startsWith(prefix)) deleteMark(k);
   }
-  if (want === inherited) state.marks.delete(key);
-  else state.marks.set(key, { path: rel, mark: want ? 'include' : 'exclude' });
+  if (want === inherited) deleteMark(key);
+  else setMark(key, { path: rel, mark: want ? 'include' : 'exclude' });
   renderTree();
 }
 
@@ -540,10 +578,11 @@ function buildRow(node, depth, side) {
 
 // ---- Выбор всех ----
 function onSelectAll(e) {
-  state.marks.clear();
+  const next = new Map();
   if (e.target.checked) {
-    state.roots.forEach((n) => state.marks.set(markKey(n.relPath), { path: n.relPath, mark: 'include' }));
+    state.roots.forEach((n) => next.set(markKey(n.relPath), { path: n.relPath, mark: 'include' }));
   }
+  replaceMarks(next);
   renderTree();
 }
 el.selectAlls.forEach((box) => box.addEventListener('change', onSelectAll));
@@ -626,7 +665,7 @@ window.api.onCrawl({
     // noAccess — другое: папки на месте, но внутрь не пускают. Звать чинить
     // связь тут незачем, а знать про пропуск всё равно нужно.
     if (ok && !partial && noAccess)
-      setStatus('done', `Готово, ${noAccess} папок без доступа`, `${fmtNum(scanned)} объектов`);
+      setStatus('done', `Готово, ${noAccess} папок и файлов без доступа`, `${fmtNum(scanned)} объектов`);
     else if (ok && partial)
       setStatus('error', 'Связь оборвалась — размеры неполные, нажмите «Обновить»', `${fmtNum(scanned)} объектов`);
     else if (ok) setStatus('done', 'Готово', `${fmtNum(scanned)} объектов`);
@@ -714,11 +753,12 @@ function renderPreview({ perFolder, totals, destTrashable, skipped = [], skipped
   const dirsNote = totals.dirs
     ? `<div class="preview-note">Папок привести в порядок: ${totals.dirs}</div>`
     : '';
-  // Папки, закрытые правами. Их содержимое не сравнивается ни на одной стороне,
-  // поэтому оно останется как есть — и сказать об этом надо до запуска, а не
-  // оставлять пользователя гадать, почему ветка не синхронизируется.
+  // Узлы, закрытые правами: чаще папка, но бывает и отдельный файл, у которого
+  // не читается даже размер. Сравнить их не с чем ни на одной стороне, поэтому
+  // они останутся как есть — и сказать об этом надо до запуска, а не оставлять
+  // пользователя гадать, почему ветка не синхронизируется.
   const skipNote = skippedTotal
-    ? `<div class="preview-warn">⚠ Нет доступа к ${skippedTotal} папкам — их содержимое не тронуто ни на одной стороне:<br>${skipped
+    ? `<div class="preview-warn">⚠ Нет доступа к ${skippedTotal} папкам и файлам — они не тронуты ни на одной стороне:<br>${skipped
         .map((p) => escapeHtml(p))
         .join('<br>')}${skippedTotal > skipped.length ? '<br>…' : ''}</div>`
     : '';
@@ -729,21 +769,46 @@ function renderPreview({ perFolder, totals, destTrashable, skipped = [], skipped
     <div class="stat trash"><span class="num">${totals.trash}</span><span class="lbl">${delLabel}</span></div>
     ${dirsNote}${warn}${skipNote}`;
 
+  const row = (pf) => {
+    const s = pf.summary;
+    const parts = [];
+    if (s.move) parts.push(`→${s.move}`);
+    if (s.copy) parts.push(`+${s.copy}`);
+    if (s.overwrite) parts.push(`~${s.overwrite}`);
+    if (s.trash) parts.push(`−${s.trash}`);
+    const counts = parts.length ? parts.join('  ') : 'без изменений';
+    return `<li><span>${escapeHtml(pf.folder)}</span><span class="pv-counts">${counts}</span></li>`;
+  };
+
+  // Пока веток немного, показываем все — в том числе те, где работы нет: список
+  // заодно подтверждает, что отмечено именно то, что человек отмечал. Дальше это
+  // перестаёт работать: «Выбрать все» на папке с десятками тысяч узлов отмечает
+  // их все (отметки живут отдельно от строк дерева), и список превращался
+  // в десятки тысяч строк разметки одним innerHTML — ровно то, на чём когда-то
+  // вставало окно истории. Причём почти все они говорили «без изменений».
+  // Поэтому сверх предела оставляем только ветки с работой, а остальные — числом.
+  let items;
+  if (perFolder.length <= PREVIEW_ROWS) {
+    items = perFolder.map(row).join('');
+  } else {
+    const busy = perFolder.filter((pf) => pf.summary.total > 0);
+    const shown = busy.slice(0, PREVIEW_ROWS);
+    const tail = [];
+    if (busy.length > shown.length) tail.push(`…ещё ${fmtNum(busy.length - shown.length)} с работой`);
+    const idle = perFolder.length - busy.length;
+    if (idle) tail.push(`${fmtNum(idle)} без изменений`);
+    items =
+      shown.map(row).join('') +
+      (tail.length ? `<li class="pv-more"><span>${tail.join(', ')}</span></li>` : '');
+  }
+
   el.previewList.innerHTML =
-    `<li class="pv-head" style="color:var(--text-dim);font-size:12px">${dirLabel}</li>` +
-    perFolder
-      .map((pf) => {
-        const s = pf.summary;
-        const parts = [];
-        if (s.move) parts.push(`→${s.move}`);
-        if (s.copy) parts.push(`+${s.copy}`);
-        if (s.overwrite) parts.push(`~${s.overwrite}`);
-        if (s.trash) parts.push(`−${s.trash}`);
-        const counts = parts.length ? parts.join('  ') : 'без изменений';
-        return `<li><span>${escapeHtml(pf.folder)}</span><span class="pv-counts">${counts}</span></li>`;
-      })
-      .join('');
+    `<li class="pv-head" style="color:var(--text-dim);font-size:12px">${dirLabel}</li>` + items;
 }
+
+// Сколько строк веток рисуем в предпросмотре. Тот же порядок, что у предела строк
+// в дереве: дело не в чтении, а в отрисовке.
+const PREVIEW_ROWS = 500;
 
 // Во время работы левая кнопка превращается в «Остановить»: главный процесс
 // прекращает работу и откатывает уже сделанное по журналу.
@@ -851,10 +916,10 @@ async function runSync() {
         '<div class="preview-note">Синхронизация прервана. Скопированное удалено, перезаписанное и удалённое возвращено на место.</div>' + lost;
     } else {
       const perm = res && res.permanentDeletes ? ` · удалено безвозвратно: ${res.permanentDeletes}` : '';
-      // Закрытые правами папки не ошибка и не работа — но и не «всё сделано».
+      // Закрытые правами узлы не ошибка и не работа — но и не «всё сделано».
       const skip =
         res && res.skippedTotal
-          ? `<div class="preview-note">Пропущено папок без доступа: ${res.skippedTotal}. Их содержимое не тронуто ни на одной стороне.</div>`
+          ? `<div class="preview-note">Пропущено без доступа: ${res.skippedTotal} папок и файлов. Они не тронуты ни на одной стороне.</div>`
           : '';
       if (res && res.failures) {
         el.progressText.textContent = `Готово с ошибками: ${res.failures} файлов не удалось${perm}`;
@@ -1018,8 +1083,18 @@ async function lightRelistTop() {
   // папку: старый узел выбрасывался вместе с загруженными детьми, раскрытая
   // ветка схлопывалась, а подпись строки «менялась» на ровном месте — и так
   // каждые шесть секунд, пока связь моргала.
+  // В признак входит и само написание имени, и дата при сортировке по дате:
+  // ключ без учёта регистра их не различает, а на экране видно и то, и другое.
+  // Без имени написание обновлялось только в модели — строка оставалась подписана
+  // по-старому до следующей перерисовки по любому другому поводу.
   const sig = (arr) =>
-    arr.map((n) => `${markKey(n.relPath)}:${n.hasLocal ? 1 : 0}${n.hasNetwork ? 1 : 0}`).join('|');
+    arr
+      .map(
+        (n) =>
+          `${n.relPath}:${n.hasLocal ? 1 : 0}${n.hasNetwork ? 1 : 0}` +
+          (state.sort === 'date' ? `:${n.mtimeMs || 0}` : '')
+      )
+      .join('|');
   const oldSig = sig(state.roots);
   const byRel = new Map(state.roots.map((n) => [markKey(n.relPath), n]));
   state.roots = listing.items.map((it) => {

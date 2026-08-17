@@ -114,13 +114,21 @@ async function planForBranch(srcRoot, dstRoot, branch, excludes, scan) {
   // и сравнивать там нечего — содержимое выбрасываем из плана на ОБЕИХ сторонах
   // разом. Порознь нельзя: закрытая ветка на источнике читалась бы как пустая,
   // а пустой источник означает «на приёмнике всё лишнее», и одна ошибка прав
-  // стирала бы с приёмника живую ветку целиком. Сам узел из списка папок
-  // не убираем: он существует, просто заглянуть в него не дают, — и значит
-  // ни создавать его, ни сносить не нужно.
+  // стирала бы с приёмника живую ветку целиком. Сам узел тоже выбывает: он
+  // существует, просто заглянуть в него не дают, — значит ни создавать его,
+  // ни сносить не нужно.
   const skipped = topPaths([...(src.skipped || []), ...(dst.skipped || [])]);
   const skipKeys = skipped.map(ciKey);
+  // Сам названный путь тоже вне сравнения, не только его содержимое. Закрытым
+  // может оказаться не папка, а отдельный файл: скан отдаёт его этим же списком,
+  // потому что размера он не знает. Проверялись только вложенные пути, и такой
+  // файл не отсекал сам себя — на приёмнике копия выглядела лишней и уезжала
+  // в Корзину. Для папки разница безобидна: закрытый узел просто не создаётся
+  // на пустом месте и не сносится с приёмника, а этого и надо.
+  const skipExact = new Set(skipKeys);
   const blind = (rel) => {
     const k = ciKey(rel);
+    if (skipExact.has(k)) return true;
     // Пустой ключ — закрыт сам корень ветки: не видно вообще ничего.
     return skipKeys.some((c) => c === '' || k.startsWith(c + '/'));
   };
@@ -338,14 +346,27 @@ async function buildRunPlan(srcRoot, dstRoot, folders, excludes, scan) {
 function countByFolder(plan, folders) {
   const blank = () => ({ move: 0, copy: 0, overwrite: 0, trash: 0, unchanged: 0, dirs: 0, total: 0 });
   const counts = new Map(folders.map((f) => [f, blank()]));
-  // От длинных к коротким: первое совпадение и есть самая точная ветка.
-  const bySpecificity = [...folders]
-    .sort((a, b) => b.length - a.length)
-    .map((f) => [f, ciKey(f)]);
+  // Ветку ищем подъёмом по пути, а не перебором всех веток на каждый путь.
+  // Перебор стоил произведения, и оба предела перемножались: «Выбрать все» на
+  // папке с тысячами узлов верхнего уровня — законный сценарий (отметки живут
+  // отдельно от строк и покрывают даже непоказанные), и 5000 веток на 100 тысяч
+  // файлов давали секунды замершего главного процесса ровно между сканом
+  // и появлением предпросмотра. Первое совпадение при подъёме — самая длинная
+  // подходящая ветка, то же, что давал перебор от длинных к коротким.
+  const byKey = new Map();
+  for (const f of folders) {
+    const k = ciKey(f);
+    if (!byKey.has(k)) byKey.set(k, counts.get(f));
+  }
   const bucketFor = (rel) => {
-    const k = ciKey(rel);
-    for (const [f, kf] of bySpecificity) if (k === kf || k.startsWith(kf + '/')) return counts.get(f);
-    return null;
+    let k = ciKey(rel);
+    for (;;) {
+      const hit = byKey.get(k);
+      if (hit) return hit;
+      const slash = k.lastIndexOf('/');
+      if (slash < 0) return null;
+      k = k.slice(0, slash);
+    }
   };
 
   // Перемещения лежат в plan.moves, остальное — под своим же именем.
@@ -364,13 +385,22 @@ function countByFolder(plan, folders) {
   // собственные родители. Для ветки 'a/b/c' план создаёт ещё 'a' и 'a/b',
   // а внутрь 'a/b/c' они не вложены — bucketFor их не находил. В шапке они были,
   // в списке по веткам нет, и сумма по строкам не сходилась с итогом.
-  const dirBucketFor = (rel) => {
-    const direct = bucketFor(rel);
-    if (direct) return direct;
-    const prefix = ciKey(rel) + '/';
-    for (const [f, kf] of bySpecificity) if (kf.startsWith(prefix)) return counts.get(f);
-    return null;
-  };
+  // Цепочки родителей размечаем разом, а не подбирая ветку под каждую папку:
+  // перебором это стоило веток на папки, и на пяти тысячах отмеченных веток
+  // выходило дороже самого прохода по файлам. Ветки берём от длинных к коротким
+  // и первую занявшую предка не перебиваем — тот же выбор, что и у перебора.
+  const ownerOfParent = new Map();
+  for (const f of [...folders].sort((a, b) => b.length - a.length)) {
+    let k = ciKey(f);
+    for (;;) {
+      const slash = k.lastIndexOf('/');
+      if (slash < 0) break;
+      k = k.slice(0, slash);
+      if (ownerOfParent.has(k)) break; // выше уже размечено этой же цепочкой
+      ownerOfParent.set(k, counts.get(f));
+    }
+  }
+  const dirBucketFor = (rel) => bucketFor(rel) || ownerOfParent.get(ciKey(rel)) || null;
   for (const rel of [...plan.dirs.create, ...plan.dirs.remove]) {
     const bucket = dirBucketFor(rel);
     if (bucket) bucket.dirs += 1;

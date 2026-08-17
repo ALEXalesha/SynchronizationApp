@@ -14,6 +14,7 @@ const path = require('node:path');
 
 const { scanFiles, crawlTree, applyPlan } = require('../src/fsops');
 const { buildRunPlan, scanFromIndex } = require('../src/plan');
+const { loadMain } = require('./helpers/main-harness');
 
 const tmpDir = () => fsp.mkdtemp(path.join(os.tmpdir(), 'syncglass-acl-'));
 
@@ -180,6 +181,39 @@ test('индекс обхода обходит закрытую папку та�
   });
   assert.strictEqual(shape(indexed), shape(live));
   assert.deepStrictEqual(indexed.skipped, ['data/locked']);
+});
+
+test('нечитаемый корень — это недоступная сторона, а не пустая', async (t) => {
+  // Достоверность списка решалась отдельным stat, а stat по закрытой правами
+  // папке проходит — readdir нет. Сторона объявлялась доступной с пустым списком,
+  // и интерфейс, поверив ответу, стирал отметки папок, которые жили только на ней.
+  // Список верхнего уровня обновляется каждые 6 секунд, так что одна осечка
+  // чтения уносила весь выбор пользователя.
+  const { call } = await loadMain();
+  const local = await tmpDir();
+  const network = await tmpDir();
+  await write(local, 'док/а.txt', 'a');
+  await write(network, 'док/а.txt', 'a');
+
+  const ok = await call('list-folders', { localPath: local, networkPath: network, relPath: '' });
+  assert.strictEqual(ok.localOk, true);
+  assert.strictEqual(ok.items.length, 1);
+
+  const restore = denyAccess(local);
+  t.after(async () => {
+    restore();
+    await fsp.rm(local, { recursive: true, force: true });
+    await fsp.rm(network, { recursive: true, force: true });
+  });
+
+  const denied = await call('list-folders', {
+    localPath: local,
+    networkPath: network,
+    relPath: '',
+    force: true,
+  });
+  assert.strictEqual(denied.localOk, false, 'корень не прочитан — верить списку нельзя');
+  assert.strictEqual(denied.networkOk, true, 'вторая сторона по-прежнему годится к показу');
 });
 
 test('закрыт сам корень выбранной ветки — ветка выбывает целиком', async (t) => {

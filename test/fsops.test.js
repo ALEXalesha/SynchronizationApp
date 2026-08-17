@@ -103,11 +103,12 @@ test('listChildren возвращает и папки, и файлы с поме
   const dir = await tmpDir();
   await writeFile(dir, 'sub/x.txt', '1');
   await writeFile(dir, 'file.txt', '2');
-  const children = await listChildren(dir);
-  const byName = Object.fromEntries(children.map((c) => [c.name, c.isDir]));
+  const { items, ok } = await listChildren(dir);
+  const byName = Object.fromEntries(items.map((c) => [c.name, c.isDir]));
+  assert.strictEqual(ok, true);
   assert.strictEqual(byName['sub'], true);
   assert.strictEqual(byName['file.txt'], false);
-  assert.strictEqual(children.length, 2);
+  assert.strictEqual(items.length, 2);
 });
 
 test('crawlTree считает размеры и количество файлов по узлам', async () => {
@@ -433,7 +434,7 @@ test('служебная папка не видна обходам и не по�
   const files = await scanFiles(dir, '', [], null, null, null, dirs);
   assert.deepStrictEqual(files.map((f) => f.path), ['обычный.txt']);
   assert.deepStrictEqual(dirs, []);
-  assert.deepStrictEqual((await listChildren(dir)).map((c) => c.name), ['обычный.txt']);
+  assert.deepStrictEqual((await listChildren(dir)).items.map((c) => c.name), ['обычный.txt']);
 });
 
 // ---- Источник исчезает между планом и применением ----
