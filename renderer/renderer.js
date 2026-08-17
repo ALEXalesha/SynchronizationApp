@@ -737,13 +737,17 @@ async function openPreview() {
 }
 
 let lastPreviewTotals = { move: 0, copy: 0, overwrite: 0, trash: 0, dirs: 0 };
-function renderPreview({ perFolder, totals, destTrashable, skipped = [], skippedTotal = 0 }) {
+function renderPreview({ perFolder, totals, skipped = [], skippedTotal = 0 }) {
   lastPreviewTotals = totals;
   const dirLabel = state.direction === 'toNetwork' ? 'Локально → Сеть' : 'Сеть → Локально';
-  const delLabel = destTrashable ? 'в Корзину' : 'удалить';
+  // Корзины нет ни на одной стороне, поэтому подпись одна и предупреждение
+  // показывается всегда, когда есть что удалять. Раньше и то и другое зависело
+  // от вида пути к приёмнику, и одна и та же сетевая папка, указанная буквой
+  // диска, обещала Корзину, которой там нет.
+  const delLabel = 'удалить';
   const warn =
-    !destTrashable && totals.trash > 0
-      ? '<div class="preview-warn">⚠ На сетевой папке нет Корзины — лишние файлы будут удалены безвозвратно.</div>'
+    totals.trash > 0
+      ? '<div class="preview-warn">⚠ Лишние файлы удаляются безвозвратно, мимо Корзины. Вернуть их можно только до конца работы — кнопкой «Остановить».</div>'
       : '';
   // Перемещения показываем только когда они есть: в обычном прогоне их ноль,
   // и лишняя плашка только мешала бы.
@@ -907,26 +911,29 @@ async function runSync() {
       el.progressFill.style.width = '0%';
       el.progressText.textContent = 'Остановлено, всё возвращено как было';
       // Сюда попадают файлы, которые не удалось отложить в служебную папку:
-      // удалённые ушли сразу в Корзину, а перезаписанные затёрты копией с источника,
-      // и в Корзине их нет вовсе. Обещать одну Корзину на оба случая нельзя.
+      // удалённые стёрты сразу, перезаписанные затёрты копией с источника.
+      // Отправлять человека искать их в Корзине нельзя — Корзина не участвует.
       const lost = res.unrecoverable
-        ? `<div class="preview-warn">⚠ ${res.unrecoverable} файлов вернуть не удалось: их пришлось обработать напрямую (обычно слишком длинный путь). Удалённые ищите в Корзине приёмника; перезаписанные заменены версией с источника.</div>`
+        ? `<div class="preview-warn">⚠ ${res.unrecoverable} файлов вернуть не удалось: их пришлось обработать напрямую (обычно слишком длинный путь). Удалённые стёрты безвозвратно; перезаписанные заменены версией с источника.</div>`
         : '';
       el.previewSummary.innerHTML =
         '<div class="preview-note">Синхронизация прервана. Скопированное удалено, перезаписанное и удалённое возвращено на место.</div>' + lost;
     } else {
-      const perm = res && res.permanentDeletes ? ` · удалено безвозвратно: ${res.permanentDeletes}` : '';
+      // Отдельной цифры «безвозвратно» в итоге больше нет: безвозвратно теперь всё,
+      // и сказано об этом до запуска, в предпросмотре, — там, где решают. А считалась
+      // она весом всей служебной папки, то есть вместе с заменёнными оригиналами:
+      // после десяти перезаписей и одного удаления в отчёте стояло «безвозвратно: 11».
       // Закрытые правами узлы не ошибка и не работа — но и не «всё сделано».
       const skip =
         res && res.skippedTotal
           ? `<div class="preview-note">Пропущено без доступа: ${res.skippedTotal} папок и файлов. Они не тронуты ни на одной стороне.</div>`
           : '';
       if (res && res.failures) {
-        el.progressText.textContent = `Готово с ошибками: ${res.failures} файлов не удалось${perm}`;
+        el.progressText.textContent = `Готово с ошибками: ${res.failures} файлов не удалось`;
         const sample = (res.failuresSample || []).map((s) => escapeHtml(s)).join('<br>');
         el.previewSummary.innerHTML = `<div class="preview-warn">⚠ Не удалось обработать ${res.failures} файлов (нет прав или заняты):<br>${sample}${res.failures > 5 ? '<br>…' : ''}</div>${skip}`;
       } else {
-        el.progressText.textContent = `Готово ✓${perm}`;
+        el.progressText.textContent = 'Готово ✓';
         if (skip) el.previewSummary.innerHTML = skip;
       }
     }

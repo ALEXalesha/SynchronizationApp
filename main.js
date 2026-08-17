@@ -1,6 +1,6 @@
 'use strict';
 
-const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const fsp = require('fs').promises;
@@ -73,10 +73,18 @@ function branchExcludes(excludes, folder, памятка) {
   return памятка.byBranch.get(ciKey(folder)) || БЕЗ_ИСКЛЮЧЕНИЙ;
 }
 
-// Корзина недоступна на сетевых (UNC) путях вида \\Комп\Папка.
-function supportsTrash(root) {
-  return !!root && !root.startsWith('\\\\');
-}
+// Корзины в этом приложении нет вовсе — удаление всегда прямое.
+//
+// Начиналось с попытки складывать лишнее в Корзину, но на сетевой стороне
+// shell.trashItem отвечает «Failed to perform delete operation» и раньше обрывал
+// синхронизацию целиком. Сетевую сторону тогда перевели на прямое удаление
+// по виду пути (\\Комп\Папка), и осталась дыра: та же шара, подключённая буквой
+// (Z:), под это правило не попадала — предпросмотр обещал Корзину, а удаление
+// шло мимо неё. Держать обещание, которое зависит от того, как именно указан
+// один и тот же сетевой каталог, хуже, чем не давать его совсем: человек решает
+// судьбу файлов по подписи в окне.
+//
+// Поэтому удаление одинаковое всегда и везде, а предпросмотр всегда предупреждает.
 
 // Есть ли папка прямо сейчас. Отсутствующую папку сканеры отдают пустым списком,
 // поэтому недоступную сторону невозможно отличить от пустой — а разница между
@@ -729,7 +737,6 @@ ipcMain.handle('preview', async (event, { localPath, networkPath, folders, exclu
     return {
       perFolder: countByFolder(plan, folders),
       totals: summarize(plan),
-      destTrashable: supportsTrash(dstRoot),
       // Закрытые правами папки: работой они не станут, но и промолчать о них
       // нельзя — иначе ветка не синхронизируется, а отчёт объявляет «Готово».
       skipped: (plan.skipped || []).slice(0, 20),
@@ -781,14 +788,6 @@ async function performSync(event, { localPath, networkPath, folders, excludes = 
     return { error: err.message };
   }
 
-  // На сетевых (UNC) путях Корзины нет — там удаляем напрямую.
-  // На локальных пытаемся в Корзину, при сбое (папка занята и т.п.) — тоже напрямую.
-  const dstTrashable = supportsTrash(dstRoot);
-  // Считаем именно файлы, ушедшие мимо Корзины, а не «был ли такой случай».
-  // Раньше здесь стоял флаг, и один-единственный файл, который не приняла
-  // Корзина, окрашивал весь запуск: отчёт объявлял безвозвратно удалённым
-  // всё, что вообще было удалено.
-  let permanentDeletes = 0;
   const rmForce = async (absPath) => {
     try {
       await fsp.rm(absPath, { recursive: true, force: true });
@@ -801,19 +800,14 @@ async function performSync(event, { localPath, networkPath, folders, excludes = 
       }
     }
   };
-  // weight — сколько файлов покрывает вызов: служебная папка уезжает одним
-  // действием на всё содержимое сразу.
-  const trashFn = async (absPath, weight = 1) => {
-    if (dstTrashable) {
-      try {
-        await shell.trashItem(absPath);
-        return;
-      } catch {
-        // не удалось в Корзину — удаляем безвозвратно ниже
-      }
-    }
+  // Отдельного счёта «сколько ушло мимо Корзины» больше нет: мимо неё уходит
+  // всё, и цифра лишь повторяла бы число удалённых. Хуже того, вес вызова
+  // покрывает всю служебную папку разом — вместе с заменёнными оригиналами, —
+  // и в отчёте «удалено безвозвратно» оказывалось на число перезаписей больше,
+  // чем человек удалял. Сколько удалено, говорит сводка запуска.
+  // Второй аргумент (вес) applyPlan передаёт по своему договору; здесь он не нужен.
+  const trashFn = async (absPath) => {
     await rmForce(absPath);
-    permanentDeletes += weight;
   };
 
   await restoreBothStages(srcRoot, dstRoot);
@@ -923,7 +917,6 @@ async function performSync(event, { localPath, networkPath, folders, excludes = 
         trash: totals.trash,
         dirs: totals.dirs,
       },
-      permanentDeletes,
       failures: res.failures.length,
       files,
       filesTruncated: allEntries.length - files.length,
@@ -933,7 +926,6 @@ async function performSync(event, { localPath, networkPath, folders, excludes = 
   return {
     done: res.done,
     total: res.total,
-    permanentDeletes,
     unrecoverable: res.unrecoverable,
     failures: res.failures.length,
     failuresSample: res.failures.slice(0, 5).map((f) => `${f.path} (${f.code})`),

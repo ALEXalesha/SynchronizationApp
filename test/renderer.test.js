@@ -358,3 +358,28 @@ test('отметка переживает смену написания вмес
   const { folders } = api.collectSelection();
   assert.deepStrictEqual(Array.from(folders), ['Док'], 'отметка осталась и переписалась под листинг');
 });
+
+// Предпросмотр — то место, где человек решает судьбу файлов, поэтому подпись
+// и предупреждение проверяются на смысл, а не только на экранирование. Раньше
+// и то и другое зависело от вида пути к приёмнику: сетевая папка, указанная
+// буквой диска, обещала Корзину, которой на шаре нет.
+function summaryOf(trash) {
+  const { api } = fresh();
+  api.renderPreview({
+    perFolder: [{ folder: 'док', summary: { move: 0, copy: 1, overwrite: 0, trash, unchanged: 0, dirs: 0, total: 1 + trash } }],
+    totals: { move: 0, copy: 1, overwrite: 0, trash, unchanged: 0, dirs: 0, total: 1 + trash },
+  });
+  return api.el.previewSummary.innerHTML;
+}
+
+test('предпросмотр обещает удаление, а не Корзину', () => {
+  const html = summaryOf(3);
+  assert.ok(!html.includes('в Корзину'), 'Корзины нет — обещать её нельзя');
+  assert.ok(html.includes('удалить'), 'подпись у счётчика удалений');
+  assert.ok(html.includes('безвозвратно'), 'предупреждение обязано быть до запуска, а не после');
+});
+
+test('без удалений предупреждение не показывается', () => {
+  const html = summaryOf(0);
+  assert.ok(!html.includes('безвозвратно'), 'пугать нечем: удалять нечего');
+});

@@ -442,3 +442,34 @@ test('сеть → локально сводит стороны так же, к�
   assert.strictEqual(res.failures, 0);
   assert.deepStrictEqual(await snapshot(local), await snapshot(network));
 });
+
+test('удаление идёт мимо Корзины и на локальной стороне тоже', async () => {
+  // Корзина убрана совсем. Раньше она работала на локальном приёмнике, а на сетевом
+  // shell.trashItem падал с «Failed to perform delete operation»; сетевую сторону
+  // определяли по виду пути, и та же шара, подключённая буквой (Z:), под правило
+  // не попадала — предпросмотр обещал Корзину, а удаление шло мимо неё. Обещание,
+  // зависящее от способа записи пути, хуже отсутствия обещания: человек решает
+  // судьбу файлов по подписи в окне.
+  //
+  // Тест держит именно это: Корзина не зовётся ни разу. Заглушка `trashed`
+  // в харнессе для того и есть — без неё возврат Корзины прошёл бы незамеченным.
+  const { call, trashed } = await ready;
+  const local = await tmpDir();
+  const network = await tmpDir();
+  await writeFile(local, 'док/нужный.txt', 'на месте');
+  await writeFile(network, 'док/нужный.txt', 'на месте');
+  await writeFile(network, 'док/лишний.txt', 'убрать');
+
+  const было = trashed.length;
+  const args = { localPath: local, networkPath: network, folders: ['док'], excludes: [], direction: 'toNetwork' };
+  const res = await call('sync', args);
+
+  assert.strictEqual(res.failures, 0);
+  assert.strictEqual(trashed.length, было, 'Корзина не должна зваться ни разу');
+  assert.deepStrictEqual(await snapshot(local), await snapshot(network), 'лишний файл всё же удалён');
+  assert.strictEqual(
+    'permanentDeletes' in res,
+    false,
+    'отдельной цифры «безвозвратно» больше нет: безвозвратно теперь всё'
+  );
+});

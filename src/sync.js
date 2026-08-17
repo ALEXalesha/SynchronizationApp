@@ -31,7 +31,7 @@ function isChanged(src, dst) {
 //   {
 //     copy:      [FileEntry]  — есть в источнике, нет в приёмнике,
 //     overwrite: [FileEntry]  — есть в обоих, но отличаются,
-//     trash:     [FileEntry]  — есть в приёмнике, нет в источнике (в Корзину),
+//     trash:     [FileEntry]  — есть в приёмнике, нет в источнике (удалить),
 //     unchanged: [FileEntry]  — совпадают,
 //   }
 function planSync(sourceEntries, destEntries) {
