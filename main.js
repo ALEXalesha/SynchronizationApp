@@ -133,6 +133,11 @@ async function branchScan(root, branch, excludes, onFile) {
 // ---- Настройки (запоминание путей между запусками) ----
 const settingsPath = path.join(app.getPath('userData'), 'settings.json');
 
+// Счётчик для имён временных файлов атомарной записи: настройки, кеш размеров
+// и история пишутся во временный файл и переименовываются поверх. Осиротевшие
+// .tmp разбирает cleanupTempFiles на старте.
+let saveSeq = 0;
+
 async function loadSettings() {
   try {
     return JSON.parse(await fsp.readFile(settingsPath, 'utf8'));
@@ -141,9 +146,15 @@ async function loadSettings() {
   }
 }
 
+// Атомарно, как история и кеш размеров. Обычный writeFile сначала обрезает файл:
+// вылет или обрыв питания между обрезанием и записью оставлял на диске пустой
+// settings.json, и следующий запуск молча забывал обе выбранные папки — а это
+// единственное, что пользователь настраивает руками.
 async function saveSettings(settings) {
   try {
-    await fsp.writeFile(settingsPath, JSON.stringify(settings, null, 2));
+    const tmp = `${settingsPath}.${++saveSeq}.tmp`;
+    await fsp.writeFile(tmp, JSON.stringify(settings, null, 2));
+    await fsp.rename(tmp, settingsPath);
   } catch {
     // настройки не критичны — молча игнорируем сбой записи
   }
@@ -168,7 +179,6 @@ async function loadSizeCache(localPath, networkPath) {
   return null;
 }
 
-let saveSeq = 0;
 // Атомарная запись: сначала во временный файл, затем переименование —
 // частичный/оборванный кеш не повредит уже сохранённый.
 async function saveSizeCache(localPath, networkPath, entries) {
@@ -219,10 +229,16 @@ function trimHistoryDetails(list) {
   });
 }
 
+// Битые записи отсеиваем здесь, у самого чтения, а не потом у каждого читателя.
+// trimHistoryDetails мусор уже сторожила, а окно истории — нет: одна запись null
+// в файле, и разметка обрывалась на полуслове, оставляя «Загрузка…» навсегда.
+// Проверять достоверность данных надо там же, где их берут, — иначе каждый
+// следующий читатель начинает с нуля и кто-нибудь обязательно забудет.
 async function loadHistory() {
   try {
     const list = JSON.parse(await fsp.readFile(historyPath, 'utf8'));
-    return Array.isArray(list) ? list : [];
+    if (!Array.isArray(list)) return [];
+    return list.filter((run) => run && typeof run === 'object' && !Array.isArray(run));
   } catch {
     return [];
   }

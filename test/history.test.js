@@ -68,6 +68,24 @@ test('запись новой синхронизации срезает пере
   assert.strictEqual(withFiles, 20, 'перечни держим ровно у последних двадцати');
 });
 
+// Массив на месте, а запись внутри — мусор (обрыв записи в старых версиях,
+// правка руками, порча на диске). trimHistoryDetails такую запись сторожила,
+// а окно истории — нет: разметка обрывалась на полуслове и оставляла «Загрузка…»
+// навсегда. Отсеиваем у самого чтения, чтобы читателям не приходилось помнить.
+test('мусор внутри массива истории отсеивается на чтении', async () => {
+  const { call, userData } = await ready;
+  await fsp.writeFile(
+    path.join(userData, 'history.json'),
+    JSON.stringify([null, runRecord(0), 5, 'строка', ['массив'], runRecord(1)])
+  );
+
+  const got = await call('get-history');
+
+  assert.strictEqual(got.length, 2, 'остаются только настоящие записи');
+  assert.ok(got.every((r) => r && typeof r === 'object' && !Array.isArray(r)));
+  assert.ok(got[0].totals);
+});
+
 test('окно истории не строит строки файлов, пока запуск не раскрыли', () => {
   const r = loadRenderer();
   const html = r.historyFilesHtml({

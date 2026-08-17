@@ -7,7 +7,7 @@ const fsp = fs.promises;
 const os = require('node:os');
 const path = require('node:path');
 
-const { buildRunPlan, countByFolder, ancestorsOf, scanFromIndex } = require('../src/plan');
+const { buildRunPlan, countByFolder, ancestorsOf, scanFromIndex, planForBranch } = require('../src/plan');
 const { scanFiles, applyPlan, STAGE_DIR } = require('../src/fsops');
 const { summarize } = require('../src/sync');
 
@@ -480,6 +480,29 @@ test('переименование одного регистра не стира
   assert.strictEqual(summarize(again).total, 0);
 });
 
+// Нашёл дифференциальный прогон: приёмник — искажённая копия источника, инвариант
+// «повтор пуст». Внутренняя папка, написанная на приёмнике иначе, давала вечную
+// перезапись — каждый запуск снова копировал те же файлы, и предпросмотр каждый
+// раз обещал ту же работу. Файл встаёт в ту же папку (для Windows это одна и та же),
+// написание папки не меняется, и на следующем запуске всё повторяется.
+test('разное написание внутренней папки не заводит вечную перезапись', async () => {
+  const src = await tmpDir();
+  const dst = await tmpDir();
+  await writeFile(src, 'док/вложено/а.txt', 'тело');
+  await writeFile(dst, 'док/ВЛОЖЕНО/а.txt', 'тело');
+  const when = new Date(2020, 0, 1);
+  await fsp.utimes(path.join(src, 'док/вложено/а.txt'), when, when);
+  await fsp.utimes(path.join(dst, 'док/ВЛОЖЕНО/а.txt'), when, when);
+
+  const plan = await buildRunPlan(src, dst, ['док'], [], liveScan);
+  assert.strictEqual(summarize(plan).total, 0, 'работы тут нет вовсе');
+
+  await applyPlan(src, dst, plan, mockTrash);
+  const again = await buildRunPlan(src, dst, ['док'], [], liveScan);
+  assert.strictEqual(summarize(again).total, 0, 'и повтор её не находит');
+  assert.deepStrictEqual(await treeOf(dst), ['док/', 'док/ВЛОЖЕНО/', 'док/ВЛОЖЕНО/а.txt']);
+});
+
 test('ветка, написанная в регистре другой стороны, не выглядит пустой в индексе', async () => {
   const src = await tmpDir();
   const dst = await tmpDir();
@@ -675,6 +698,33 @@ test('счётчики по веткам не платят произведен�
     'ни один путь не потерялся'
   );
   assert.ok(spent < 2000, `счётчики заняли ${spent} мс — похоже на перебор всех веток`);
+});
+
+test('закрытые правами узлы не платят произведением на файлы ветки', async () => {
+  // Список закрытых узлов считался коротким: «закрытая папка даёт одну запись,
+  // внутрь не спускаемся». С тех пор в него попадают и отдельные файлы, у которых
+  // не читается даже размер, — шара, где папку листать дают, а stat по файлам нет,
+  // отдаёт запись на каждый файл. Перебор всего списка на каждый путь ветки давал
+  // произведение: тысяча закрытых на 50 тысяч видимых — десять секунд замершего
+  // главного процесса, и это на каждую выбранную ветку отдельно.
+  const skipped = Array.from({ length: 2000 }, (_, i) => `закрыт${i}.dat`);
+  const files = Array.from({ length: 50000 }, (_, i) => ({
+    path: `видно/ф${i}.txt`,
+    size: 1,
+    mtimeMs: 0,
+  }));
+  const scan = async () => ({ files, dirs: ['видно'], skipped });
+
+  // Источник — настоящая папка (иначе сканер не позовут), приёмника нет вовсе:
+  // тогда всё видимое встаёт в copy и его легко пересчитать.
+  const src = await tmpDir();
+  const started = Date.now();
+  const branch = await planForBranch(src, path.join(src, 'нет-такой'), '', [], scan);
+  const spent = Date.now() - started;
+
+  assert.strictEqual(branch.plan.copy.length, 50000, 'видимые файлы остались в плане');
+  assert.strictEqual(branch.skipped.length, 2000, 'закрытые названы все');
+  assert.ok(spent < 2000, `план ветки занял ${spent} мс — похоже на перебор всего списка`);
 });
 
 test('остановка возвращает на место файл, снятый конфликтом в предке', async () => {

@@ -118,20 +118,13 @@ async function planForBranch(srcRoot, dstRoot, branch, excludes, scan) {
   // существует, просто заглянуть в него не дают, — значит ни создавать его,
   // ни сносить не нужно.
   const skipped = topPaths([...(src.skipped || []), ...(dst.skipped || [])]);
-  const skipKeys = skipped.map(ciKey);
   // Сам названный путь тоже вне сравнения, не только его содержимое. Закрытым
   // может оказаться не папка, а отдельный файл: скан отдаёт его этим же списком,
   // потому что размера он не знает. Проверялись только вложенные пути, и такой
   // файл не отсекал сам себя — на приёмнике копия выглядела лишней и уезжала
   // в Корзину. Для папки разница безобидна: закрытый узел просто не создаётся
   // на пустом месте и не сносится с приёмника, а этого и надо.
-  const skipExact = new Set(skipKeys);
-  const blind = (rel) => {
-    const k = ciKey(rel);
-    if (skipExact.has(k)) return true;
-    // Пустой ключ — закрыт сам корень ветки: не видно вообще ничего.
-    return skipKeys.some((c) => c === '' || k.startsWith(c + '/'));
-  };
+  const blind = underAny(skipped);
   const seen = (side) =>
     skipped.length
       ? { files: side.files.filter((e) => !blind(e.path)), dirs: side.dirs.filter((d) => !blind(d)) }
@@ -147,11 +140,7 @@ async function planForBranch(srcRoot, dstRoot, branch, excludes, scan) {
   // такого узла, из плана вычёркиваем: к моменту удаления по одному его уже нет.
   // Результат скана при этом не трогаем — он лежит в кеше и переживёт нас.
   const inner = findTypeConflicts(srcSeen, dstSeen);
-  const innerKeys = inner.map(ciKey);
-  const covered = (rel) => {
-    const k = ciKey(rel);
-    return innerKeys.some((c) => k === c || k.startsWith(c + '/'));
-  };
+  const covered = underAny(inner);
   const dstFiles = inner.length ? dstSeen.files.filter((e) => !covered(e.path)) : dstSeen.files;
   const dstDirs = inner.length ? dstSeen.dirs.filter((d) => !covered(d)) : dstSeen.dirs;
   appendAll(conflicts, inner.map(under));
@@ -253,6 +242,41 @@ function appendAll(target, items) {
   for (const item of items) target.push(item);
 }
 
+// Есть ли в keys сам путь k или любой его предок. Подъёмом по пути, а не перебором
+// keys: перебор стоил произведения двух пределов, и оба выросли до законных величин.
+// Ключи уже приведены к нижнему регистру, k тоже.
+function coveredByKey(keys, k) {
+  let cur = k;
+  for (;;) {
+    if (keys.has(cur)) return true;
+    const slash = cur.lastIndexOf('/');
+    if (slash < 0) return false;
+    cur = cur.slice(0, slash);
+  }
+}
+
+// Готовит проверку «путь лежит внутри одного из названных узлов (или сам им является)».
+//
+// Раньше это был перебор всего списка на каждый путь ветки, и два предела
+// перемножались. Список закрытых правами узлов считался коротким — «закрытая папка
+// даёт одну запись, внутрь не спускаемся», — но с тех пор в него попадают и отдельные
+// файлы, у которых не читается даже размер: шара, где папку листать дают, а stat
+// по файлам нет, отдаёт запись на каждый файл. Тысяча таких записей на ветку
+// в 50 тысяч файлов — десять секунд замершего главного процесса ровно между
+// сканом и появлением предпросмотра, и это ещё на каждую выбранную ветку отдельно.
+// Подъём по пути стоит глубины пути, а она измеряется единицами.
+function underAny(paths) {
+  const keys = new Set();
+  for (const p of paths) {
+    const k = ciKey(p);
+    // Пустой ключ — назван сам корень ветки: не видно вообще ничего.
+    if (k === '') return () => true;
+    keys.add(k);
+  }
+  if (keys.size === 0) return () => false;
+  return (rel) => coveredByKey(keys, ciKey(rel));
+}
+
 // Оставляет только верхние узлы списка: без повторов и без вложенных.
 // Для конфликтов это обязательно: общий предок двух выбранных веток приходит
 // сюда дважды, а конфликт в глубине ветки может оказаться внутри конфликтного
@@ -260,14 +284,17 @@ function appendAll(target, items) {
 // месту нашёл бы там пусто — и записал бы в отчёт файл, удалённый безвозвратно,
 // хотя он цел. Для закрытых правами папок — та же логика: показывать пользователю
 // вложенные пути внутри уже названной закрытой ветки незачем.
+// Сортировка по длине ставит предка раньше потомка, поэтому к моменту проверки
+// потомка предок уже в наборе. Проверяем подъёмом по пути, а не перебором набора:
+// закрытых правами узлов может быть не единицы, а тысячи (см. underAny).
 function topPaths(paths) {
   const kept = [];
-  const keys = [];
+  const keys = new Set();
   for (const rel of [...paths].sort((a, b) => a.length - b.length)) {
     const k = ciKey(rel);
-    if (keys.some((c) => k === c || k.startsWith(c + '/'))) continue;
+    if (coveredByKey(keys, k)) continue;
     kept.push(rel);
-    keys.push(k);
+    keys.add(k);
   }
   return kept;
 }

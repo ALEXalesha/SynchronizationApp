@@ -22,7 +22,7 @@ const fsp = fs.promises;
 const os = require('node:os');
 const path = require('node:path');
 
-const { buildRunPlan, scanFromIndex } = require('../src/plan');
+const { buildRunPlan, scanFromIndex, countByFolder } = require('../src/plan');
 const { summarize } = require('../src/sync');
 const { scanFiles, crawlTree, applyPlan, restoreStage, STAGE_DIR } = require('../src/fsops');
 
@@ -199,6 +199,113 @@ test('остановка в любой точке возвращает приё�
       fs.existsSync(path.join(dst, STAGE_DIR)),
       false,
       `прогон ${i}: после отката осталась служебная папка`
+    );
+  }
+});
+
+// Шестой закон. Пять предыдущих строят две независимые случайные стороны, и
+// пересечение у них слабое: почти всё оказывается «скопировать» и «в Корзину»,
+// а пары, различающиеся только написанием пути, встречаются едва-едва. Здесь
+// приёмник — искажённая копия источника, поэтому в план массово попадают
+// перезаписи, конфликты типов и папки, написанные иначе. Именно так и нашлась
+// вечная перезапись: файл в папке, написанной на приёмнике другим регистром,
+// уходил в перезапись на каждом запуске — предпросмотр обещал работу, работа
+// выполнялась, следующий предпросмотр обещал ровно ту же.
+//
+// Дерево тут гуще, чем у общего makeTree: закон держится на папках, написанных
+// на приёмнике иначе, а редкая папка на редкий шанс перевернуть написание давала
+// на все сорок прогонов пять таких случаев — мутацией проверено, что этого мало,
+// и с внесённым обратно багом прогон оставался зелёным.
+async function makeDenseTree(root, depth = 0) {
+  const n = 1 + Math.floor(rnd() * 3);
+  for (let i = 0; i < n; i += 1) {
+    const name = pick(NAMES) + i;
+    const p = path.join(root, name);
+    try {
+      if (depth < 3 && rnd() < 0.55) {
+        await fsp.mkdir(p, { recursive: true });
+        await makeDenseTree(p, depth + 1);
+      } else {
+        await fsp.writeFile(p, 'c'.repeat(Math.floor(rnd() * 40)) + name);
+      }
+    } catch {
+      // имя уже занято узлом другого типа — это тоже часть случая
+    }
+  }
+}
+
+async function perturbedCopy(src, dst, rel = '') {
+  let dirents;
+  try {
+    dirents = await fsp.readdir(path.join(src, rel), { withFileTypes: true });
+  } catch {
+    return;
+  }
+  await fsp.mkdir(path.join(dst, rel), { recursive: true });
+  for (const d of dirents) {
+    const r = rel ? `${rel}/${d.name}` : d.name;
+    const roll = rnd();
+    try {
+      if (roll < 0.08) continue; // на приёмнике этого узла нет
+      if (d.isDirectory()) {
+        if (roll < 0.13) {
+          await fsp.writeFile(path.join(dst, r), 'на приёмнике это файл');
+          continue;
+        }
+        // Написание папки расходится со стороной-источником. Дальше в неё пишем
+        // по имени источника: для Windows это та же самая папка, и написание
+        // приёмника так и остаётся — ровно как в жизни.
+        const name = roll < 0.5 ? d.name.toUpperCase() : d.name;
+        await fsp.mkdir(path.join(dst, rel ? `${rel}/${name}` : name), { recursive: true });
+        await perturbedCopy(src, dst, r);
+      } else {
+        if (roll < 0.13) {
+          await fsp.mkdir(path.join(dst, r), { recursive: true });
+          continue;
+        }
+        const body = await fsp.readFile(path.join(src, r), 'utf8');
+        await fsp.writeFile(path.join(dst, r), roll < 0.3 ? body + '!' : body);
+      }
+    } catch {
+      // имя уже занято узлом другого типа — это тоже часть случая
+    }
+  }
+}
+
+test('предпросмотр не врёт: сумма по веткам сходится, а повтор пуст', async (t) => {
+  for (let i = 1; i <= 40; i += 1) {
+    setSeed(i * 7919 + 57);
+    const base = await fsp.mkdtemp(path.join(os.tmpdir(), 'syncglass-inv-'));
+    t.after(() => fsp.rm(base, { recursive: true, force: true }).catch(() => {}));
+    const src = path.join(base, 'src');
+    const dst = path.join(base, 'dst');
+    await fsp.mkdir(src);
+    await fsp.mkdir(dst);
+    await makeDenseTree(src);
+    await perturbedCopy(src, dst);
+
+    const folders = await fsp.readdir(src);
+    if (!folders.length) continue;
+    const excludes = (await allPaths(src)).filter((p) => p.includes('/') && rnd() < 0.12);
+
+    const plan = await buildRunPlan(src, dst, folders, excludes, scanner);
+    const totals = summarize(plan);
+    const perFolder = countByFolder(plan, folders);
+    const sum = perFolder.reduce((n, pf) => n + pf.summary.total, 0);
+    assert.strictEqual(
+      sum,
+      totals.total,
+      `прогон ${i}: сумма по веткам ${sum} != итог ${totals.total} (ветки: ${folders.join(',')})`
+    );
+
+    const res = await applyPlan(src, dst, plan, rmTrash);
+    assert.deepStrictEqual(res.failures, [], `прогон ${i}: ошибки на ровном месте`);
+
+    const again = await buildRunPlan(src, dst, folders, excludes, scanner);
+    assert.strictEqual(
+      summarize(again).total,
+      0,
+      `прогон ${i}: повтор нашёл работу (исключения: ${excludes.join(',') || '—'})`
     );
   }
 });
