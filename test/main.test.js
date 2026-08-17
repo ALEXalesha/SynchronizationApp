@@ -11,6 +11,7 @@ const fsp = fs.promises;
 const path = require('node:path');
 
 const { loadMain, tmpDir, writeFile, snapshot } = require('./helpers/main-harness');
+const crypto = require('node:crypto');
 const { STAGE_DIR } = require('../src/fsops');
 
 // main.js держит состояние (кеши, токены, замок синхронизации) в модуле,
@@ -88,6 +89,35 @@ test('план по индексу фонового обхода совпада�
   const поИндексу = await call('preview', args);
 
   assert.deepStrictEqual(поИндексу.totals, живой.totals);
+});
+
+// Достоверность данных проверяется там же, где их берут: у истории так и
+// сделано, а кеш размеров брал `entries` как есть. Битый файл (обрыв записи
+// от старой версии, правка руками, сбой диска) уезжал в renderer как готовые
+// размеры, и первая же строка мусора роняла обработчик обхода — окно оставалось
+// с надписью «Загрузка размеров» навсегда.
+test('битый кеш размеров не выдаётся за готовые размеры', async () => {
+  const { call, userData, sent } = await ready;
+  const local = await tmpDir();
+  const network = await tmpDir();
+  await writeFile(local, 'док/ф.txt', 'раз');
+
+  const hash = crypto.createHash('md5').update(`${local}\0${network}`).digest('hex');
+  const файл = path.join(userData, `sizecache-${hash}.json`);
+
+  for (const мусор of ['"вместо массива строка"', '5', '[1, 2]', '[{"нет":"пути"}, null]']) {
+    await fsp.writeFile(файл, JSON.stringify({ localPath: local, networkPath: network, entries: JSON.parse(мусор) }));
+    const было = sent.length;
+    const r = await call('start-crawl', { localPath: local, networkPath: network });
+
+    assert.strictEqual(r.ok, true, `обход обязан пройти, а не упасть на кеше ${мусор}`);
+    const мусорВЭфире = sent
+      .slice(было)
+      .filter((s) => s.ch === 'crawl-cached')
+      .flatMap((s) => s.payload.entries)
+      .filter((e) => !e || typeof e.relPath !== 'string');
+    assert.deepStrictEqual(мусорВЭфире, [], `кеш ${мусор} пролез в интерфейс`);
+  }
 });
 
 test('исключённая ветка не копируется и не удаляется', async () => {

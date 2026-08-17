@@ -169,10 +169,17 @@ function sizeCacheFile(localPath, networkPath) {
   return path.join(app.getPath('userData'), `sizecache-${hash}.json`);
 }
 
+// Достоверность проверяем здесь же, у самого чтения, — как это делает загрузка
+// истории, и по той же причине: иначе каждый следующий читатель начинает с нуля
+// и кто-нибудь обязательно забудет. Кеш переживает и смену версии, и обрыв
+// питания, а уезжает он прямо в интерфейс как готовые размеры: строка вместо
+// массива разбиралась там посимвольно и роняла весь приём обхода.
 async function loadSizeCache(localPath, networkPath) {
   try {
     const data = JSON.parse(await fsp.readFile(sizeCacheFile(localPath, networkPath), 'utf8'));
-    if (data.localPath === localPath && data.networkPath === networkPath) return data.entries;
+    if (data.localPath !== localPath || data.networkPath !== networkPath) return null;
+    if (!Array.isArray(data.entries)) return null;
+    return data.entries.filter((e) => e && typeof e.relPath === 'string');
   } catch {
     // нет кеша — не страшно
   }

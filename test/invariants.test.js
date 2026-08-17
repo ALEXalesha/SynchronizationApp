@@ -121,6 +121,24 @@ async function build(t) {
   return { src, dst, folders: [...names] };
 }
 
+// Ветки верхнего уровня с обеих сторон, схлопнутые по регистру — ровно так их
+// собирает `list-folders`, а отметки в дереве лежат под ключом без учёта регистра
+// и вторым написанием той же папки стать не могут. Без этого одна и та же ветка
+// приходила в план дважды ('Doc0' с источника и 'DOC0' с приёмника), каждый файл
+// под ней планировался к удалению по два раза, а отчёт обещал вдвое больше
+// удалённого, чем уносил. Интерфейс такого входа не даёт — значит и прогон
+// не должен: закон, проверяющий невозможное, ловит только собственные выдумки.
+async function верхниеВетки(...roots) {
+  const поКлючу = new Map();
+  for (const root of roots) {
+    for (const d of await fsp.readdir(root)) {
+      if (d === STAGE_DIR) continue;
+      if (!поКлючу.has(d.toLowerCase())) поКлючу.set(d.toLowerCase(), d);
+    }
+  }
+  return [...поКлючу.values()];
+}
+
 // Пути источника, годные в исключения.
 async function allPaths(root, rel = '', out = []) {
   let ds;
@@ -549,6 +567,243 @@ test('цепочка прогонов в обе стороны с обрывам
   }
 });
 
+// Десятый закон. Всё остальное считается по статичному снимку: план построен —
+// дерево замерло. В жизни оно не замирает. Скан и запись разделены минутами,
+// и между ними файл успевают удалить, дописать, переименовать и подменить папкой.
+// Гонки до сих пор проверялись только точечно, подменой конкретного `stat`,
+// а тут дерево меняется прямо посреди работы.
+//
+// Порчу вносим по счётчику действий, а не по таймеру: тогда «на каком шаге
+// дерево дрогнуло» — часть засеянного случая, и упавший прогон повторяется
+// дословно. По таймеру он не повторился бы ни разу.
+// Возвращает путь, который тронула, — иначе испорченное самим прогоном
+// не отличить от испорченного нами.
+//
+// `цели` — пути, которые есть в плане. Без прицела вандал бил наугад по всему
+// дереву и до случая «файл, обещанный к перезаписи, исчез ровно перед
+// копированием» не доходил ни разу: мутация «не возвращать оригинал» проходила
+// зелёной. Случайность тут нужна в том, КОГДА рушится, а не в том, что именно.
+async function vandalize(root, тронутые, цели = []) {
+  const файлы = [];
+  for (const rel of await allPaths(root)) {
+    if (rel === STAGE_DIR || rel.startsWith(`${STAGE_DIR}/`)) continue;
+    файлы.push(rel);
+  }
+  if (!файлы.length) return;
+  const вПлане = цели.filter((c) => файлы.some((f) => f.toLowerCase() === c.toLowerCase()));
+  const rel = вПлане.length && rnd() < 0.75 ? pick(вПлане) : pick(файлы);
+  if (тронутые) тронутые.add(rel.toLowerCase());
+  const abs = path.join(root, rel);
+  const бросок = rnd();
+  try {
+    const st = await fsp.stat(abs);
+    if (!st.isFile()) {
+      // Папку сносим целиком: так посреди работы исчезает не файл, а ветка.
+      if (бросок < 0.5) await fsp.rm(abs, { recursive: true, force: true });
+      return;
+    }
+    if (бросок < 0.35) await fsp.rm(abs);
+    else if (бросок < 0.6) await fsp.writeFile(abs, `дописано ${rnd()}`);
+    else if (бросок < 0.8) {
+      // Файл сменился папкой прямо под руками: копирование по этому пути теперь
+      // упрётся в каталог, а обход по нему пойдёт вглубь.
+      await fsp.rm(abs);
+      await fsp.mkdir(abs, { recursive: true });
+      await fsp.writeFile(path.join(abs, 'подменыш.txt'), 'этого не было в плане');
+    } else await fsp.writeFile(path.join(root, `${rel}.новый`), 'появился по ходу работы');
+  } catch {
+    // не вышло испортить — этот шаг просто проходит спокойно
+  }
+}
+
+test('дерево, изменившееся посреди работы, не уносит с собой чужие файлы', async (t) => {
+  for (let i = 1; i <= 60; i += 1) {
+    setSeed(i * 7919 + 503);
+    // Приёмник — искажённая копия источника, а не отдельное случайное дерево:
+    // на независимых деревьях пути почти не совпадают, перезаписей в плане
+    // единицы, и портить посреди работы оказывается нечего.
+    const base = await fsp.mkdtemp(path.join(os.tmpdir(), 'syncglass-inv-'));
+    t.after(() => fsp.rm(base, { recursive: true, force: true }).catch(() => {}));
+    const src = path.join(base, 'src');
+    const dst = path.join(base, 'dst');
+    await fsp.mkdir(src);
+    await fsp.mkdir(dst);
+    await makeDenseTree(src);
+    await perturbedCopy(src, dst);
+    const folders = await верхниеВетки(src, dst);
+    if (!folders.length) continue;
+
+    const доПрогона = await snap(dst);
+    const plan = await buildRunPlan(src, dst, folders, [], scanner);
+    const total = summarize(plan).total;
+    if (total === 0) continue;
+    // Закон формулируем от обратного: не «изменившееся совпадает с источником»
+    // (источник тут сам меняется под руками, и сверять с ним нечего), а «того,
+    // чего не было в плане, работа не касалась вовсе». Это и есть обещание
+    // приложения: приёмник меняется ровно там, где обещал предпросмотр.
+    const вПлане = new Set();
+    for (const e of [...plan.trash, ...plan.copy, ...plan.overwrite]) вПлане.add(e.path.toLowerCase());
+    for (const m of plan.moves) {
+      вПлане.add(m.from.toLowerCase());
+      вПлане.add(m.to.toLowerCase());
+    }
+    const конфликты = plan.conflicts.map((c) => c.toLowerCase());
+    // Исчезнуть с приёмника имеет право только то, что и планировалось убрать.
+    const запланированоУбрать = new Set([
+      ...plan.trash.map((e) => e.path.toLowerCase()),
+      ...plan.moves.map((m) => m.from.toLowerCase()),
+    ]);
+
+    // Портим обе стороны: источник уходит из-под копирования, приёмник —
+    // из-под удаления. Вторая половина важнее: там чужая правка встречается
+    // с нашей записью.
+    const порчаНа = new Set([1]);
+    // Первая точка всегда первая, и на ней бьём прицельно (см. ниже). Случайные
+    // точки к этому добавляются, но полагаться на них нельзя: замер показал
+    // 62 перезаписи на 55 прогонов и ни одного случая «источник исчез до своей
+    // очереди» — перезаписи идут последней фазой и составляют считаные проценты
+    // шагов, так что случайный бросок в них почти не попадает.
+    const точек = Math.min(3, total);
+    while (порчаНа.size < точек) порчаНа.add(1 + Math.floor(rnd() * total));
+    let done = 0;
+    let сорвалось = null;
+    // Отчёт о прогрессе никто не дожидается — `report` зовёт его и идёт дальше.
+    // Значит порча продолжается и после возврата из applyPlan, а снимок, снятый
+    // в этот момент, ловит дерево прямо посреди правки. Собираем обещания
+    // и дожидаемся их сами.
+    const порча = [];
+    const испорченоНаПриёмнике = new Set();
+    const целиИсточника = [...plan.overwrite.map((e) => e.path), ...plan.copy.map((e) => e.path)];
+    const целиПриёмника = [...plan.overwrite.map((e) => e.path), ...plan.trash.map((e) => e.path)];
+    try {
+      await applyPlan(src, dst, plan, rmTrash, () => {
+        done += 1;
+        if (!порчаНа.has(done)) return;
+        // На первом же шаге сносим с источника файл, обещанный к перезаписи.
+        // Его очередь ещё не подошла, и когда подойдёт, копировать будет нечего:
+        // оригинал приёмника к тому моменту уже отложен в служебную папку, и его
+        // обязаны вернуть на место. Это самая злая из гонок и единственная,
+        // до которой случайный бросок не доходит.
+        if (done === 1 && plan.overwrite.length) {
+          порча.push(fsp.rm(path.join(src, pick(plan.overwrite).path)).catch(() => {}));
+          return;
+        }
+        const вПриёмник = rnd() < 0.5;
+        порча.push(
+          вПриёмник
+            ? vandalize(dst, испорченоНаПриёмнике, целиПриёмника)
+            : vandalize(src, null, целиИсточника)
+        );
+      });
+    } catch (err) {
+      сорвалось = err;
+    }
+    await Promise.all(порча);
+    const испорчено = (k) => {
+      for (const p of испорченоНаПриёмнике) if (k === p || k.startsWith(`${p}/`)) return true;
+      return false;
+    };
+    assert.strictEqual(
+      сорвалось,
+      null,
+      `прогон ${i}: работа сорвалась исключением вместо того, чтобы записать осечку (${сорвалось && сорвалось.message})`
+    );
+
+    // Сверяем сразу, без restoreStage. Разбор служебной папки на старте
+    // следующего запуска — страховка на случай вылета, а доведённый до конца
+    // прогон обязан оставить приёмник верным сам. Подмешай мы сюда разбор — он
+    // вернул бы то, что прогон потерял, и потеря прошла бы незамеченной.
+    // Проверено мутацией: с ним закон не ловит невозвращённый оригинал.
+    const послеПрогона = await snap(dst);
+    const тронуто = [];
+    const пропало = [];
+    for (const [k, v] of доПрогона) {
+      if (v === '/' || испорчено(k)) continue;
+      // Половина первая: чего не было в плане, того работа не касалась вовсе.
+      if (послеПрогона.get(k) !== v && !вПлане.has(k) && !конфликты.some((c) => k === c || k.startsWith(`${c}/`))) {
+        тронуто.push(`${k}: было ${JSON.stringify(v)}, стало ${JSON.stringify(послеПрогона.get(k))}`);
+      }
+      // Половина вторая: пропасть без следа имеет право только то, что и должно
+      // было исчезнуть. Файл, обещанный к перезаписи, обязан остаться на месте
+      // хоть в каком-то виде: если источник исчез посреди работы, оригинал
+      // возвращают из служебной папки, а не оставляют дыру.
+      if (послеПрогона.get(k) !== undefined) continue;
+      if (запланированоУбрать.has(k)) continue;
+      if (конфликты.some((c) => k === c || k.startsWith(`${c}/`))) continue;
+      пропало.push(k);
+    }
+    assert.deepStrictEqual(
+      тронуто,
+      [],
+      `прогон ${i}: правка на ходу утащила за собой файл, которого не было в плане`
+    );
+    assert.deepStrictEqual(
+      пропало,
+      [],
+      `прогон ${i}: файл исчез с приёмника, хотя убирать его никто не собирался`
+    );
+  }
+});
+
+// Одиннадцатый закон. Вес вызова Корзины — это обещание: «столько файлов
+// покрывает этот вызов». На нём главный процесс считает «удалено безвозвратно»,
+// и на сетевом приёмнике, где Корзины нет вовсе, эта цифра — единственное, что
+// человек узнает о потере. Проверялось это одним точечным тестом на конфликт
+// типа; здесь обещание сверяется с последствием на случайных деревьях.
+//
+// Смотрим именно на обещание, а не на настоящее «мимо Корзины»: безвозвратно
+// файлы уходят только на UNC-пути, а его в прогоне не сделать. Зато `trashFn`
+// подменяется, и что бы главный процесс ни решил делать дальше, считать он
+// будет по этому весу.
+async function countFilesUnder(abs) {
+  let dirents;
+  try {
+    dirents = await fsp.readdir(abs, { withFileTypes: true });
+  } catch {
+    return 1; // не папка — значит один узел
+  }
+  let n = 0;
+  for (const d of dirents) {
+    if (d.isSymbolicLink()) continue;
+    n += d.isDirectory() ? await countFilesUnder(path.join(abs, d.name)) : 1;
+  }
+  return n;
+}
+
+test('вес вызова Корзины равен числу файлов, которые этот вызов уносит', async (t) => {
+  for (let i = 1; i <= 40; i += 1) {
+    setSeed(i * 7919 + 607);
+    const base = await fsp.mkdtemp(path.join(os.tmpdir(), 'syncglass-inv-'));
+    t.after(() => fsp.rm(base, { recursive: true, force: true }).catch(() => {}));
+    const src = path.join(base, 'src');
+    const dst = path.join(base, 'dst');
+    await fsp.mkdir(src);
+    await fsp.mkdir(dst);
+    await makeDenseTree(src);
+    await perturbedCopy(src, dst);
+    const folders = await верхниеВетки(src, dst);
+    if (!folders.length) continue;
+
+    let обещано = 0;
+    let унесено = 0;
+    const считающаяКорзина = async (abs, вес = 1) => {
+      обещано += вес;
+      унесено += await countFilesUnder(abs);
+      await fsp.rm(abs, { recursive: true, force: true });
+    };
+
+    const plan = await buildRunPlan(src, dst, folders, [], scanner);
+    if (summarize(plan).total === 0) continue;
+    await applyPlan(src, dst, plan, считающаяКорзина);
+
+    assert.strictEqual(
+      обещано,
+      унесено,
+      `прогон ${i}: обещали вес ${обещано}, а унесли ${унесено} файлов`
+    );
+  }
+});
+
 test('при падающих файловых операциях ни один файл не исчезает с обеих сторон', async (t) => {
   // Самый ценный закон: у приложения вся защита от потери данных построена
   // на служебной папке и журнале, а проверить её можно только отказами.
@@ -620,15 +875,18 @@ test('история не врёт: перечисленное в записи �
     await makeDenseTree(src);
     await perturbedCopy(src, dst);
 
-    const names = new Set();
-    for (const root of [src, dst]) {
-      for (const d of await fsp.readdir(root)) if (d !== STAGE_DIR) names.add(d);
-    }
-    if (names.size === 0) continue;
+    const folders = await верхниеВетки(src, dst);
+    if (!folders.length) continue;
 
+    // Направление чередуем: `src` и `dst` тут всегда источник и приёмник, а вот
+    // какая из сторон при этом «локальная», решает направление — и от него
+    // зависит и Корзина, и то, какой корень главный процесс разбирает первым.
+    // Обратная сторона до сих пор проверялась только точечными тестами.
+    const кСети = i % 2 === 1;
     const args = {
-      localPath: src, networkPath: dst,
-      folders: [...names], excludes: [], direction: 'toNetwork',
+      localPath: кСети ? src : dst,
+      networkPath: кСети ? dst : src,
+      folders, excludes: [], direction: кСети ? 'toNetwork' : 'toLocal',
     };
     const до = await snap(dst);
     const наИсточнике = await snap(src);
@@ -682,4 +940,66 @@ test('история не врёт: перечисленное в записи �
       assert.deepStrictEqual(умолчали, [], `прогон ${i}: файл изменился, а в истории о нём ни слова`);
     }
   }
+});
+
+// Двенадцатый закон. `escapeHtml` проверялся сам по себе — он верный. Но верная
+// функция ничего не значит, если её забыли позвать: разметка собирается
+// `innerHTML` в трёх разных местах, и «здесь экранируем, а здесь и так сойдёт» —
+// ровно то расхождение соседей, которое эта ревизия ловила уже дважды.
+// Поэтому спрашиваем не функцию, а результат: имя, пришедшее с диска, не имеет
+// права оказаться в разметке разметкой.
+//
+// Имена файлов на Windows не могут содержать `<` и `"`, зато могут `&`, `'`
+// и `#`. Проверяем всё равно всем набором: имена приходят и с сетевых шар,
+// и из истории, записанной другой версией, а разбирать по одному, что «здесь
+// невозможно», — способ однажды ошибиться.
+const ЗЛОЕ = `<i&"'>злое`;
+const ЭКРАНИРОВАННОЕ = '&lt;i&amp;&quot;&#39;&gt;злое';
+
+// Вся разметка поддерева: innerHTML лежит на каждом узле заглушки отдельно.
+function всяРазметка(узел, out = []) {
+  if (typeof узел.innerHTML === 'string' && узел.innerHTML) out.push(узел.innerHTML);
+  for (const ребёнок of узел.children || []) всяРазметка(ребёнок, out);
+  return out;
+}
+
+test('имя с диска не становится разметкой ни в одном окне', async () => {
+  const проверки = [];
+
+  for (let i = 1; i <= 12; i += 1) {
+    setSeed(i * 7919 + 701);
+    const имя = `${pick(['', 'a', 'папка'])}${ЗЛОЕ}${Math.floor(rnd() * 100)}`;
+    const ui = loadRenderer();
+
+    // Дерево: строка со злым именем на обеих сторонах.
+    ui.state.roots = [ui.makeNode({ name: имя, relPath: имя, isDir: rnd() < 0.5, hasLocal: true, hasNetwork: true })];
+    ui.__ctx.renderTree();
+    проверки.push(...всяРазметка(ui.el.localList), ...всяРазметка(ui.el.networkList));
+
+    // Предпросмотр: имя ветки и путь узла, закрытого правами.
+    ui.renderPreview({
+      perFolder: [{ folder: имя, summary: { move: 0, copy: 1, overwrite: 0, trash: 0, dirs: 0, total: 1 } }],
+      totals: { move: 0, copy: 1, overwrite: 0, trash: 1, dirs: 1, total: 3 },
+      destTrashable: false,
+      skipped: [имя],
+      skippedTotal: 1,
+    });
+    проверки.push(ui.el.previewSummary.innerHTML, ui.el.previewList.innerHTML);
+
+    // История: перечень файлов запуска.
+    проверки.push(
+      ui.historyFilesHtml({ files: [{ action: pick(['copy', 'trash', 'move', 'overwrite']), path: имя }] })
+    );
+  }
+
+  const сырое = проверки.filter((html) => html.includes(ЗЛОЕ));
+  assert.deepStrictEqual(
+    сырое,
+    [],
+    'имя попало в разметку как есть — где-то забыли escapeHtml'
+  );
+  assert.ok(
+    проверки.some((html) => html.includes(ЭКРАНИРОВАННОЕ)),
+    'ни одно окно не показало имя вовсе — закон проверял пустоту'
+  );
 });
