@@ -232,6 +232,73 @@ function scanFromIndex(idx, branch, excludes) {
   return { files, dirs, skipped };
 }
 
+// Раскладывает весь индекс обхода по выбранным веткам за один проход.
+//
+// scanFromIndex перебирает весь индекс на каждую ветку и на каждую сторону,
+// и два предела перемножались. Оба законные: «Выбрать все» на папке с тысячами
+// узлов верхнего уровня отмечает их все (отметки живут отдельно от строк дерева),
+// а индекс растёт до предела обхода в 300 тысяч. Замер: 5000 веток на 105 тысяч
+// узлов — 83 секунды замершего главного процесса ровно между сканом и появлением
+// предпросмотра. Живой скан столько не стоит: он читает каждую ветку один раз,
+// то есть обходит дерево целиком, а не по разу на ветку. Разница видна только
+// при включённом подсчёте размеров — тот самый случай, когда один и тот же выбор
+// ведёт себя по-разному, а объяснить это пользователю нечем.
+//
+// Хозяин пути ищется подъёмом по нему же, как закрытые правами узлы и ветки
+// в countByFolder: первая ветка-предок и есть хозяин, а исключение, встреченное
+// раньше неё, лежит внутри этой ветки и путь отсекает. Вложенная ветка рядом
+// с родителем всегда отделена от него исключением — включить обе иначе нельзя, —
+// поэтому «самая глубокая ветка» и «любая ветка-предок» тут дают одно и то же.
+//
+// Режем по настоящей строке, а не по приведённой: приведение регистра у отдельных
+// букв меняет длину, и отрезанное по ключу «начало» пришлось бы не на границу
+// сегмента. Границы берём из самого пути, поэтому длина ключа роли не играет.
+function groupIndexByBranch(idx, folders, excludes) {
+  const branches = new Map(); // ciKey(ветка) → ветка
+  const groups = new Map(); // ciKey(ветка) → { files, dirs, skipped }
+  for (const f of folders) {
+    const k = ciKey(f);
+    if (!branches.has(k)) {
+      branches.set(k, f);
+      groups.set(k, { files: [], dirs: [], skipped: [] });
+    }
+  }
+  const excl = new Set([...excludes].map(ciKey));
+
+  // Ветка-хозяйка пути и сам путь относительно неё, либо null.
+  const ownerOf = (rel) => {
+    if (excl.has(ciKey(rel))) return null;
+    let cut = rel.lastIndexOf('/');
+    for (;;) {
+      const head = cut < 0 ? '' : rel.slice(0, cut);
+      const k = ciKey(head);
+      if (branches.has(k)) return { key: k, rel: head ? rel.slice(head.length + 1) : rel };
+      if (excl.has(k)) return null;
+      if (cut < 0) return null;
+      cut = head.lastIndexOf('/');
+    }
+  };
+
+  for (const [rel, meta] of idx.files) {
+    const own = ownerOf(rel);
+    if (own) groups.get(own.key).files.push({ path: own.rel, size: meta.size, mtimeMs: meta.mtimeMs });
+  }
+  for (const rel of idx.dirs) {
+    const own = ownerOf(rel);
+    if (own) groups.get(own.key).dirs.push(own.rel);
+  }
+  for (const rel of idx.skipped || []) {
+    // Закрыт сам корень ветки — живой скан обозначает это пустой строкой,
+    // потому что он и стартует изнутри ветки. Индекс же держит полные пути.
+    // Ветке-предку этот же узел виден обычным путём, поэтому достаётся обеим.
+    const self = branches.has(ciKey(rel)) ? ciKey(rel) : null;
+    if (self !== null) groups.get(self).skipped.push('');
+    const own = ownerOf(rel);
+    if (own) groups.get(own.key).skipped.push(own.rel);
+  }
+  return groups;
+}
+
 // Дописывает items в конец target. Именно циклом, а не push(...items):
 // спред раскладывает массив в аргументы вызова, а их число ограничено
 // (около 125 тысяч), и на ветке в сотни тысяч файлов слияние планов падало
@@ -441,6 +508,7 @@ module.exports = {
   planForBranch,
   countByFolder,
   scanFromIndex,
+  groupIndexByBranch,
   statType,
   ancestorsOf,
 };

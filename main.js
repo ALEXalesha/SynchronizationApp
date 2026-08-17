@@ -8,7 +8,7 @@ const fsp = require('fs').promises;
 const crypto = require('crypto');
 const { summarize } = require('./src/sync');
 const { scanFiles, listChildren, crawlTree, applyPlan, restoreStage } = require('./src/fsops');
-const { buildRunPlan, countByFolder, scanFromIndex } = require('./src/plan');
+const { buildRunPlan, countByFolder, scanFromIndex, groupIndexByBranch } = require('./src/plan');
 const { rootsOverlap, ciKey } = require('./src/paths');
 
 let mainWindow;
@@ -120,13 +120,28 @@ function crawlSideFor(root) {
 // Файлы и папки ветки branch (пути относительно branch): из обхода, иначе живой скан.
 // onFile нужен предпросмотру для прогресса и отмены, поэтому сканер собирается
 // на каждый запуск отдельно.
-function makeScanner(onFile = null) {
-  return (root, branch, excludes) => branchScan(root, branch, excludes, onFile);
+// folders — весь список веток запуска. С ним индекс раскладывается по веткам
+// за один проход на сторону; без него каждая ветка перебирала весь индекс,
+// и два законных предела перемножались (см. groupIndexByBranch). Раскладку
+// считаем лениво и держим до конца запуска: план зовёт сканер по разу на ветку.
+function makeScanner(onFile = null, folders = null) {
+  const поСторонам = new Map();
+  return (root, branch, excludes) => branchScan(root, branch, excludes, onFile, folders, поСторонам);
 }
 
-async function branchScan(root, branch, excludes, onFile) {
+const ПУСТО = { files: [], dirs: [], skipped: [] };
+
+async function branchScan(root, branch, excludes, onFile, folders, поСторонам) {
   const idx = crawlSideFor(root);
-  if (idx) return scanFromIndex(idx, branch, excludes);
+  if (idx) {
+    if (!folders) return scanFromIndex(idx, branch, excludes);
+    let groups = поСторонам.get(root);
+    if (!groups) {
+      groups = groupIndexByBranch(idx, folders, excludes);
+      поСторонам.set(root, groups);
+    }
+    return groups.get(ciKey(branch || '')) || ПУСТО;
+  }
   return getScan(path.join(root, branch), branchExcludes(excludes, branch), onFile);
 }
 
@@ -199,12 +214,17 @@ async function saveSizeCache(localPath, networkPath, entries) {
   }
 }
 
+// Тоже через временный файл, как все три соседа. Сосед этот писал напрямую,
+// а writeFileSync сначала обрезает файл — и происходит это ровно в момент выхода,
+// когда система и так вправе прибить процесс (перезагрузка, выключение). Целый
+// кеш на дереве в сотни тысяч узлов сменялся обрезком, обрезок не разбирался,
+// и следующий запуск ждал полный обход с нуля вместо мгновенного показа.
 function saveSizeCacheSync(localPath, networkPath, entries) {
   try {
-    fs.writeFileSync(
-      sizeCacheFile(localPath, networkPath),
-      JSON.stringify({ localPath, networkPath, entries })
-    );
+    const file = sizeCacheFile(localPath, networkPath);
+    const tmp = `${file}.${++saveSeq}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify({ localPath, networkPath, entries }));
+    fs.renameSync(tmp, file);
   } catch {
     // кеш не критичен
   }
@@ -701,7 +721,7 @@ ipcMain.handle('preview', async (event, { localPath, networkPath, folders, exclu
   try {
     await assertRootsReachable(srcRoot, dstRoot);
     await restoreBothStages(srcRoot, dstRoot);
-    const plan = await buildRunPlan(srcRoot, dstRoot, folders, excludes, makeScanner(onFile));
+    const plan = await buildRunPlan(srcRoot, dstRoot, folders, excludes, makeScanner(onFile, folders));
     return {
       perFolder: countByFolder(plan, folders),
       totals: summarize(plan),
@@ -798,7 +818,7 @@ async function performSync(event, { localPath, networkPath, folders, excludes = 
   // Тогда план строить не на чем — выходим до того, как хоть что-то тронули.
   let plan;
   try {
-    plan = await buildRunPlan(srcRoot, dstRoot, folders, excludes, makeScanner());
+    plan = await buildRunPlan(srcRoot, dstRoot, folders, excludes, makeScanner(null, folders));
   } catch (err) {
     // Сорвался обычно обрыв связи. Что успели прочитать до него — уже под вопросом,
     // поэтому кеши сбрасываем: следующая попытка пойдёт за свежими данными.

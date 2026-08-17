@@ -120,6 +120,46 @@ test('битый кеш размеров не выдаётся за готовы
   }
 });
 
+// Закрытие окна посреди обхода не проверялось ничем: заглушка глотала события
+// самого приложения. А сохранение там своё, синхронное, и писало оно прямо
+// в боевой файл, обрезая его первым же вызовом. Момент выхода — ровно тот,
+// когда система вправе прибить процесс, и целый кеш на сотни тысяч узлов
+// сменялся обрезком. Обрезок не разбирается, и следующий запуск ждёт полный
+// обход вместо мгновенного показа.
+test('прогресс обхода, сохранённый при закрытии, читается следующим запуском', async () => {
+  const { call, fireApp, userData, sent } = await ready;
+  const local = await tmpDir();
+  const network = await tmpDir();
+  // Дерево такое, чтобы обход заведомо не успел закончиться за один тик:
+  // сохранять при закрытии нечего, пока он не начался и после того, как он встал.
+  for (let i = 0; i < 400; i += 1) await writeFile(local, `док/п${i % 20}/ф${i}.txt`, 'x'.repeat(i));
+
+  const идёт = call('start-crawl', { localPath: local, networkPath: network });
+  const было = sent.length;
+  while (!sent.slice(было).some((s) => s.ch === 'crawl-progress')) {
+    await new Promise((r) => setImmediate(r));
+  }
+  fireApp('before-quit');
+
+  const hash = crypto.createHash('md5').update(`${local}\0${network}`).digest('hex');
+  const файл = path.join(userData, `sizecache-${hash}.json`);
+  // Читаем сразу: доигравший обход сохранит поверх уже полный кеш.
+  const данные = JSON.parse(fs.readFileSync(файл, 'utf8'));
+  await идёт;
+
+  assert.strictEqual(данные.localPath, local);
+  assert.ok(данные.entries.length > 0, 'при закрытии сохранилось пусто');
+  assert.ok(
+    данные.entries.every((e) => typeof e.relPath === 'string'),
+    'записи не годятся в мгновенный показ'
+  );
+  assert.deepStrictEqual(
+    (await fsp.readdir(userData)).filter((f) => f.endsWith('.tmp')),
+    [],
+    'временный файл остался лежать'
+  );
+});
+
 test('исключённая ветка не копируется и не удаляется', async () => {
   const { call } = await ready;
   const local = await tmpDir();

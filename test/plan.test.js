@@ -7,7 +7,9 @@ const fsp = fs.promises;
 const os = require('node:os');
 const path = require('node:path');
 
-const { buildRunPlan, countByFolder, ancestorsOf, scanFromIndex, planForBranch } = require('../src/plan');
+const {
+  buildRunPlan, countByFolder, ancestorsOf, scanFromIndex, groupIndexByBranch, planForBranch,
+} = require('../src/plan');
 const { scanFiles, applyPlan, STAGE_DIR } = require('../src/fsops');
 const { summarize } = require('../src/sync');
 
@@ -751,6 +753,38 @@ test('исключения не платят произведением на ф�
   assert.strictEqual(scan.files.length, 120000, 'исключённое вырезано, остальное на месте');
   assert.strictEqual(scan.dirs.length, 1200);
   assert.ok(spent < 2000, `разбор индекса занял ${spent} мс — похоже на перебор исключений`);
+});
+
+test('ветки не платят произведением на весь индекс', async () => {
+  // Соседнюю проверку — исключения на файлы индекса — починили, а сам разбор
+  // остался перебором всего индекса на каждую ветку. Оба предела законные:
+  // «Выбрать все» на папке с тысячами узлов верхнего уровня отмечает их все,
+  // а индекс растёт до 300 тысяч. Замер до правки: 5000 веток на 105 тысяч узлов
+  // и две стороны — 83 секунды замершего главного процесса ровно между сканом
+  // и появлением предпросмотра. Живой скан столько не стоит: он читает каждую
+  // ветку один раз, то есть обходит дерево целиком, а не по разу на ветку.
+  const files = new Map();
+  const dirs = new Set();
+  const folders = [];
+  for (let i = 0; i < 5000; i += 1) {
+    folders.push(`ветка${i}`);
+    dirs.add(`ветка${i}`);
+    for (let j = 0; j < 20; j += 1) files.set(`ветка${i}/файл${j}.txt`, { size: 1, mtimeMs: 0 });
+  }
+
+  const started = Date.now();
+  const groups = groupIndexByBranch({ files, dirs, skipped: [] }, folders, []);
+  const spent = Date.now() - started;
+
+  assert.strictEqual(groups.size, 5000);
+  assert.strictEqual(groups.get('ветка0').files.length, 20);
+  assert.strictEqual(groups.get('ветка0').files[0].path, 'файл0.txt', 'путь относительно ветки');
+  assert.strictEqual(
+    [...groups.values()].reduce((n, g) => n + g.files.length, 0),
+    files.size,
+    'ни один путь не потерялся'
+  );
+  assert.ok(spent < 2000, `раскладка индекса заняла ${spent} мс — похоже на проход по индексу на каждую ветку`);
 });
 
 test('остановка возвращает на место файл, снятый конфликтом в предке', async () => {

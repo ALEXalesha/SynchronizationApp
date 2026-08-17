@@ -12,12 +12,12 @@ const fsp = require('node:fs').promises;
 
 const APP_ROOT = path.join(__dirname, '..', '..');
 
-function electronStub(userDataDir, handlers, trashed) {
+function electronStub(userDataDir, handlers, trashed, appEvents) {
   return {
     app: {
       getPath: () => userDataDir,
       requestSingleInstanceLock: () => true,
-      on: () => {},
+      on: (event, fn) => appEvents.set(event, fn),
       whenReady: () => Promise.resolve(),
       quit: () => {},
     },
@@ -41,11 +41,14 @@ function electronStub(userDataDir, handlers, trashed) {
   };
 }
 
-// Возвращает { call, sent, trashed, userData }.
+// Возвращает { call, fireApp, sent, trashed, userData }.
 // call(channel, args) вызывает обработчик так же, как это делает preload.
+// fireApp(event) дёргает обработчик события самого приложения ('before-quit'):
+// без него всё, что происходит при закрытии окна, не проверялось ничем.
 async function loadMain() {
   const userData = await fsp.mkdtemp(path.join(os.tmpdir(), 'syncglass-ud-'));
   const handlers = new Map();
+  const appEvents = new Map();
   const trashed = [];
   const sent = [];
 
@@ -54,7 +57,7 @@ async function loadMain() {
     id: electronPath,
     filename: electronPath,
     loaded: true,
-    exports: electronStub(userData, handlers, trashed),
+    exports: electronStub(userData, handlers, trashed, appEvents),
   };
 
   const mainPath = require.resolve(path.join(APP_ROOT, 'main.js'));
@@ -67,7 +70,12 @@ async function loadMain() {
     if (!fn) throw new Error(`нет обработчика: ${channel}`);
     return fn(event, args);
   };
-  return { call, sent, trashed, userData };
+  const fireApp = (event) => {
+    const fn = appEvents.get(event);
+    if (!fn) throw new Error(`нет обработчика события: ${event}`);
+    return fn();
+  };
+  return { call, fireApp, sent, trashed, userData };
 }
 
 const tmpDir = () => fsp.mkdtemp(path.join(os.tmpdir(), 'syncglass-ipc-'));

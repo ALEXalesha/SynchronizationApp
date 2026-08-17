@@ -22,7 +22,8 @@ const fsp = fs.promises;
 const os = require('node:os');
 const path = require('node:path');
 
-const { buildRunPlan, scanFromIndex, countByFolder } = require('../src/plan');
+const { buildRunPlan, scanFromIndex, groupIndexByBranch, countByFolder } = require('../src/plan');
+const { ciKey } = require('../src/paths');
 const { summarize } = require('../src/sync');
 const { scanFiles, crawlTree, applyPlan, restoreStage, STAGE_DIR } = require('../src/fsops');
 const { loadRenderer } = require('./helpers/renderer-harness');
@@ -153,6 +154,51 @@ async function allPaths(root, rel = '', out = []) {
     if (d.isDirectory()) await allPaths(root, r, out);
   }
   return out;
+}
+
+// Индекс одной стороны в том же виде, в каком его собирает фоновый обход.
+async function indexOfSide(root) {
+  const files = new Map();
+  const dirs = new Set();
+  const skipped = [];
+  await crawlTree(root, '', (rel, isFolder, size, cnt, mtimeMs) => {
+    if (isFolder) dirs.add(rel);
+    else files.set(rel, { size, mtimeMs });
+  }, null, skipped);
+  return { files, dirs, skipped };
+}
+
+// Ветки и исключения, какими их порождает интерфейс: не случайный список путей,
+// а последствие кликов по дереву. Только так рождается вложенная пара «выбрано,
+// внутри снято, а ещё глубже снова выбрано» — единственный способ получить две
+// вложенные ветки разом, и самый тонкий вход для всего, что разбирает выбор.
+function кликамиПоДереву(узлы) {
+  const ui = loadRenderer();
+  const верх = узлы.filter((p) => !p.includes('/'));
+  const внутри = (какие) => {
+    const отмеченные = [];
+    for (const m of ui.state.marks.values()) {
+      if (!какие || m.mark === какие) отмеченные.push(m.path.toLowerCase() + '/');
+    }
+    return узлы.filter((p) => отмеченные.some((m) => p.toLowerCase().startsWith(m)));
+  };
+  ui.toggleCheck({ relPath: pick(верх.length ? верх : узлы), isDir: true });
+  for (let k = 0; k < 14; k += 1) {
+    const бросок = rnd();
+    // Отдельно целимся внутрь уже снятого: только так рождается «исключено,
+    // а внутри снова включено» — случай, ради которого выбор и трёхпозиционный.
+    const глубже = бросок < 0.4 ? внутри('exclude') : бросок < 0.75 ? внутри(null) : [];
+    ui.toggleCheck({ relPath: pick(глубже.length ? глубже : узлы), isDir: true });
+  }
+  // Проход по одной цепочке сверху вниз. Клик по каждому предку подряд даёт
+  // чередование «включено / исключено / снова включено» гарантированно, а не
+  // по счастливой случайности: на одних случайных кликах такая пара выпадала
+  // четыре раза на тридцать прогонов, и мутация на ней не ловилась.
+  const цепочка = pick(узлы).split('/');
+  for (let d = 1; d <= цепочка.length; d += 1) {
+    ui.toggleCheck({ relPath: цепочка.slice(0, d).join('/'), isDir: true });
+  }
+  return { ui, ...ui.collectSelection() };
 }
 
 test('приёмник становится точной копией источника', async (t) => {
@@ -353,16 +399,6 @@ test('план по индексу обхода совпадает с плано
   // Два независимых источника данных для одного и того же решения. Разойдись
   // они — один и тот же выбор давал бы разный результат в зависимости от того,
   // включён ли подсчёт размеров, а такую разницу пользователю не объяснить.
-  const indexOf = async (root) => {
-    const files = new Map();
-    const dirs = new Set();
-    const skipped = [];
-    await crawlTree(root, '', (rel, isFolder, size, cnt, mtimeMs) => {
-      if (isFolder) dirs.add(rel);
-      else files.set(rel, { size, mtimeMs });
-    }, null, skipped);
-    return { files, dirs, skipped };
-  };
   const shape = (p) => JSON.stringify({
     copy: p.copy.map((e) => e.path.toLowerCase()).sort(),
     overwrite: p.overwrite.map((e) => e.path.toLowerCase()).sort(),
@@ -380,7 +416,7 @@ test('план по индексу обхода совпадает с плано
     if (!folders.length) continue;
     const excludes = (await allPaths(src)).filter(() => rnd() < 0.15);
 
-    const idx = { [src]: await indexOf(src), [dst]: await indexOf(dst) };
+    const idx = { [src]: await indexOfSide(src), [dst]: await indexOfSide(dst) };
     const byIndex = (root, branch, ex) => scanFromIndex(idx[root], branch, ex);
 
     const live = await buildRunPlan(src, dst, folders, excludes, scanner);
@@ -388,6 +424,66 @@ test('план по индексу обхода совпадает с плано
 
     assert.strictEqual(shape(indexed), shape(live), `прогон ${i}: скан и индекс разошлись`);
   }
+});
+
+// Тринадцатый закон. Пятый связал поветочный разбор индекса с живым сканом,
+// но сам разбор перебирал весь индекс на каждую ветку, и два законных предела
+// перемножались (см. groupIndexByBranch). Раскладка за один проход дешевле
+// ровно настолько, насколько она рискованнее: хозяин пути ищется подъёмом,
+// а не сравнением префикса, и вложенные ветки с исключением между ними — самый
+// тонкий случай. Закон и держит эти два способа за одно место: что отдаёт
+// раскладка ветке, то же обязан отдать и перебор. Ветки берём не случайные,
+// а кликами по дереву — интерфейс других не порождает, а закон, проверяющий
+// невозможный вход, ловит только собственные выдумки.
+test('раскладка индекса по веткам совпадает с поветочным разбором', async (t) => {
+  const shape = (s) => JSON.stringify({
+    files: s.files.map((e) => `${e.path.toLowerCase()}:${e.size}`).sort(),
+    dirs: s.dirs.map((d) => d.toLowerCase()).sort(),
+    skipped: (s.skipped || []).map((d) => d.toLowerCase()).sort(),
+  });
+  let вложенных = 0;
+  let всего = 0;
+
+  for (let i = 1; i <= 30; i += 1) {
+    setSeed(i * 7919 + 1013);
+    const base = await fsp.mkdtemp(path.join(os.tmpdir(), 'syncglass-inv-'));
+    t.after(() => fsp.rm(base, { recursive: true, force: true }).catch(() => {}));
+    const src = path.join(base, 'src');
+    const dst = path.join(base, 'dst');
+    await fsp.mkdir(src);
+    await fsp.mkdir(dst);
+    await makeDenseTree(src);
+    await perturbedCopy(src, dst);
+
+    const узлы = [...new Set([...(await allPaths(src)), ...(await allPaths(dst))])];
+    if (!узлы.length) continue;
+
+    const { folders, excludes } = кликамиПоДереву(узлы);
+    if (!folders.length) continue;
+    всего += 1;
+    // Вложенная пара веток («выбрано docs, снято docs/a, снова выбрано docs/a/b»)
+    // и есть случай, ради которого закон написан: без неё подъём по пути и сравнение
+    // префикса совпадают тривиально.
+    if (folders.some((a) => folders.some((b) => a !== b && ciKey(a).startsWith(ciKey(b) + '/')))) {
+      вложенных += 1;
+    }
+
+    for (const root of [src, dst]) {
+      const idx = await indexOfSide(root);
+      const groups = groupIndexByBranch(idx, folders, excludes);
+      for (const folder of folders) {
+        const перебором = scanFromIndex(idx, folder, excludes);
+        const раскладкой = groups.get(ciKey(folder)) || { files: [], dirs: [], skipped: [] };
+        assert.strictEqual(
+          shape(раскладкой),
+          shape(перебором),
+          `прогон ${i}: ветка ${folder} разошлась (исключения: ${excludes.join(',') || '—'})`
+        );
+      }
+    }
+  }
+  // Плотность генератора: закон без вложенных веток ничего не стоит.
+  assert.ok(вложенных >= 5, `вложенных пар веток всего ${вложенных} из ${всего} прогонов — генератор до случая не доходит`);
 });
 
 // Восьмой закон. Все прочие прогоны зовут buildRunPlan с готовым списком веток
@@ -412,36 +508,8 @@ test('что отмечено на экране, то и синхронизир�
     if (!узлы.length) continue;
 
     // Клики идут и по верхнему уровню, и вглубь — как у человека, который
-    // развернул ветку и снял в ней пару галочек. Больше половины кликов нарочно
-    // приходится внутрь уже отмеченного: сам по себе случайный выбор из всего
-    // дерева давал вложенную пару «исключено, а внутри снова включено» один раз
-    // на тридцать прогонов, а весь смысл трёхпозиционного выбора именно в ней.
-    const ui = loadRenderer();
-    const верх = узлы.filter((p) => !p.includes('/'));
-    const внутри = (какие) => {
-      const отмеченные = [];
-      for (const m of ui.state.marks.values()) {
-        if (!какие || m.mark === какие) отмеченные.push(m.path.toLowerCase() + '/');
-      }
-      return узлы.filter((p) => отмеченные.some((m) => p.toLowerCase().startsWith(m)));
-    };
-    ui.toggleCheck({ relPath: pick(верх.length ? верх : узлы), isDir: true });
-    for (let k = 0; k < 14; k += 1) {
-      const бросок = rnd();
-      // Отдельно целимся внутрь уже снятого: только так рождается «исключено,
-      // а внутри снова включено» — случай, ради которого выбор и трёхпозиционный.
-      const глубже = бросок < 0.4 ? внутри('exclude') : бросок < 0.75 ? внутри(null) : [];
-      ui.toggleCheck({ relPath: pick(глубже.length ? глубже : узлы), isDir: true });
-    }
-    // Проход по одной цепочке сверху вниз. Клик по каждому предку подряд даёт
-    // чередование «включено / исключено / снова включено» гарантированно, а не
-    // по счастливой случайности: на одних случайных кликах такая пара выпадала
-    // четыре раза на тридцать прогонов, и мутация на ней не ловилась.
-    const цепочка = pick(узлы).split('/');
-    for (let d = 1; d <= цепочка.length; d += 1) {
-      ui.toggleCheck({ relPath: цепочка.slice(0, d).join('/'), isDir: true });
-    }
-    const { folders, excludes } = ui.collectSelection();
+    // развернул ветку и снял в ней пару галочек.
+    const { ui, folders, excludes } = кликамиПоДереву(узлы);
     if (!folders.length) continue;
 
     const доПрогона = await snap(dst);
