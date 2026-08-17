@@ -8,7 +8,9 @@ const fsp = require('fs').promises;
 const crypto = require('crypto');
 const { summarize } = require('./src/sync');
 const { scanFiles, listChildren, crawlTree, applyPlan, restoreStage } = require('./src/fsops');
-const { buildRunPlan, countByFolder, scanFromIndex, groupIndexByBranch } = require('./src/plan');
+const {
+  buildRunPlan, countByFolder, scanFromIndex, groupIndexByBranch, groupExcludesByBranch,
+} = require('./src/plan');
 const { rootsOverlap, ciKey } = require('./src/paths');
 
 let mainWindow;
@@ -60,15 +62,15 @@ async function getScan(absFolderPath, excludes = null, onFile = null) {
 // и делает их относительными к folder (как ждёт scanFiles).
 // Регистр не сверяем по той же причине, что и везде: имя ветки могло прийти
 // с той стороны, которая пишет его иначе.
-function branchExcludes(excludes, folder) {
-  const prefix = folder + '/';
-  const set = new Set();
-  for (const ex of excludes) {
-    if (ex.length > prefix.length && ciKey(ex.slice(0, prefix.length)) === ciKey(prefix)) {
-      set.add(ex.slice(prefix.length));
-    }
-  }
-  return set;
+// Раскладку считаем один раз на запуск и держим в памятке сканера: перебор всего
+// списка на каждую ветку и на каждую сторону стоил произведения двух законных
+// пределов (см. groupExcludesByBranch). Список исключений за запуск не меняется —
+// его собирает renderer перед вызовом и присылает целиком.
+const БЕЗ_ИСКЛЮЧЕНИЙ = new Set();
+
+function branchExcludes(excludes, folder, памятка) {
+  if (!памятка.byBranch) памятка.byBranch = groupExcludesByBranch(excludes);
+  return памятка.byBranch.get(ciKey(folder)) || БЕЗ_ИСКЛЮЧЕНИЙ;
 }
 
 // Корзина недоступна на сетевых (UNC) путях вида \\Комп\Папка.
@@ -126,12 +128,14 @@ function crawlSideFor(root) {
 // считаем лениво и держим до конца запуска: план зовёт сканер по разу на ветку.
 function makeScanner(onFile = null, folders = null) {
   const поСторонам = new Map();
-  return (root, branch, excludes) => branchScan(root, branch, excludes, onFile, folders, поСторонам);
+  const исключения = { byBranch: null };
+  return (root, branch, excludes) =>
+    branchScan(root, branch, excludes, onFile, folders, поСторонам, исключения);
 }
 
 const ПУСТО = { files: [], dirs: [], skipped: [] };
 
-async function branchScan(root, branch, excludes, onFile, folders, поСторонам) {
+async function branchScan(root, branch, excludes, onFile, folders, поСторонам, исключения) {
   const idx = crawlSideFor(root);
   if (idx) {
     if (!folders) return scanFromIndex(idx, branch, excludes);
@@ -142,7 +146,7 @@ async function branchScan(root, branch, excludes, onFile, folders, поСтор�
     }
     return groups.get(ciKey(branch || '')) || ПУСТО;
   }
-  return getScan(path.join(root, branch), branchExcludes(excludes, branch), onFile);
+  return getScan(path.join(root, branch), branchExcludes(excludes, branch, исключения), onFile);
 }
 
 // ---- Настройки (запоминание путей между запусками) ----

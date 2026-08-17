@@ -8,10 +8,34 @@ const { sameContent, runPool, APPLY_CONCURRENCY } = require('./fsops');
 const { ciKey } = require('./paths');
 
 // Тип узла на стороне root: 'dir' | 'file' | 'missing'.
+//
+// memo — общая на весь запуск памятка «сторона и путь → тип». Ветки планируются
+// по одной, и без неё две вещи умножались друг на друга: цепочка родителей
+// у каждой ветки читалась заново (у пяти тысяч веток вида 'год/квартал/N'
+// на 'год' и 'год/квартал' уходило пять тысяч пар обращений вместо одной),
+// а сами обращения шли строго по очереди — по кругу до сетевого диска на каждую
+// ветку. Замер: 3000 вложенных веток — 18 тысяч вызовов stat вместо 6 тысяч,
+// и все последовательно. На локальном диске это доли секунды, на шаре с 3 мс
+// на обращение — около минуты замершего главного процесса ровно между сканом
+// и появлением предпросмотра.
+//
+// Ключ приводим к нижнему регистру: 'Док' и 'док' — один и тот же узел, файловая
+// система разницы не видит, и второй раз спрашивать её не о чем.
+function statType(root, rel, memo) {
+  if (!memo) return readType(root, rel);
+  const key = `${root}\0${ciKey(rel)}`;
+  let pending = memo.get(key);
+  if (!pending) {
+    pending = readType(root, rel);
+    memo.set(key, pending);
+  }
+  return pending;
+}
+
 // ENOTDIR — это путь, у которого один из предков файл. Узла там нет так же
 // надёжно, как при ENOENT (Windows и вовсе отвечает вторым на первое), а разбирать
 // предка — не дело stat: этим занимается фаза конфликтов.
-async function statType(root, rel) {
+async function readType(root, rel) {
   try {
     const st = await fsp.stat(path.join(root, rel));
     if (st.isDirectory()) return 'dir';
@@ -45,24 +69,46 @@ function ancestorsOf(branch) {
 }
 
 // Типы списка относительных путей на стороне root, в том же порядке.
-async function typesOf(root, rels) {
-  return Promise.all(rels.map((rel) => statType(root, rel)));
+async function typesOf(root, rels, memo) {
+  return Promise.all(rels.map((rel) => statType(root, rel, memo)));
+}
+
+// Читает типы всех веток и их родителей на обеих сторонах разом и складывает
+// в памятку. Пул нужен именно из-за сети: обращения независимы, а по одному
+// они стоят полного круга до шары каждое. Дальше план разбирает ветки как
+// разбирал — по очереди, — но диска они уже не касаются.
+async function prefetchTypes(srcRoot, dstRoot, folders) {
+  const memo = new Map();
+  const items = [];
+  const seen = new Set();
+  for (const folder of folders) {
+    for (const rel of folder ? [folder, ...ancestorsOf(folder)] : ['']) {
+      for (const root of [srcRoot, dstRoot]) {
+        const key = `${root}\0${ciKey(rel)}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        items.push({ root, rel });
+      }
+    }
+  }
+  await runPool(items, APPLY_CONCURRENCY, (item) => statType(item.root, item.rel, memo));
+  return memo;
 }
 
 // План для одной выбранной ветки (папки ИЛИ отдельного файла).
 // Все пути в результате — от корня стороны, а не от ветки: только так виден
 // перенос файла из одной выбранной ветки в другую.
 // scan(root, branch, excludes) → { files, dirs } с путями относительно branch.
-async function planForBranch(srcRoot, dstRoot, branch, excludes, scan) {
+async function planForBranch(srcRoot, dstRoot, branch, excludes, scan, types = null) {
   // Родителей проверяем на каждой стороне отдельно: ветки может не быть
   // на источнике, а её родитель там есть, и тогда удалять его на приёмнике
   // нельзя — иначе с приёмника пропала бы живая папка.
   const parents = branch ? ancestorsOf(branch) : [];
   const [srcType, dstType, srcParentTypes, dstParentTypes] = await Promise.all([
-    statType(srcRoot, branch),
-    statType(dstRoot, branch),
-    typesOf(srcRoot, parents),
-    typesOf(dstRoot, parents),
+    statType(srcRoot, branch, types),
+    statType(dstRoot, branch, types),
+    typesOf(srcRoot, parents, types),
+    typesOf(dstRoot, parents, types),
   ]);
   const srcParents = parents.filter((_, i) => srcParentTypes[i] === 'dir');
   const dstParents = parents.filter((_, i) => dstParentTypes[i] === 'dir');
@@ -299,6 +345,47 @@ function groupIndexByBranch(idx, folders, excludes) {
   return groups;
 }
 
+// Исключения, разложенные по веткам за один проход: ciKey(ветка) → набор путей
+// относительно этой ветки. Ровно то, что живой скан ждёт от каждой ветки.
+//
+// Тот же перемножающийся предел, что и у разбора индекса, но на соседней дороге:
+// индексный путь чинили, а живой рядом остался перебирать весь список исключений
+// на каждую ветку и на каждую сторону. Оба предела законные и растут из одного
+// и того же места — отметки в дереве: «Выбрать все» на папке с тысячами узлов
+// даёт тысячи веток, снятые внутри галочки — тысячи исключений. Замер: 5000 веток
+// на 30 тысяч исключений — 88 секунд замершего главного процесса ровно между
+// сканом и появлением предпросмотра, и это без подсчёта размеров, то есть там,
+// где раскладка индекса не спасает.
+//
+// Путь принадлежит всем своим предкам, а не одному: вложенная ветка выбирается
+// вместе с родителем, и запрет внутри неё виден обеим. Поэтому поднимаемся
+// по пути до корня, а не останавливаемся на первой ветке.
+//
+// Режем по настоящей строке, а не по приведённой, — по той же причине, что
+// и в groupIndexByBranch: приведение регистра у отдельных букв меняет длину,
+// а границы сегментов берутся из самого пути.
+function groupExcludesByBranch(excludes) {
+  const byBranch = new Map();
+  for (const ex of excludes) {
+    let cut = ex.lastIndexOf('/');
+    // cut === 0 быть не может: путь не начинается со слеша. Исключение верхнего
+    // уровня ('док') предка-ветки не имеет — его хозяин корень, а корень
+    // веткой не бывает: дерево показывает только детей корня.
+    while (cut > 0) {
+      const head = ex.slice(0, cut);
+      const k = ciKey(head);
+      let set = byBranch.get(k);
+      if (!set) {
+        set = new Set();
+        byBranch.set(k, set);
+      }
+      set.add(ex.slice(cut + 1));
+      cut = head.lastIndexOf('/');
+    }
+  }
+  return byBranch;
+}
+
 // Дописывает items в конец target. Именно циклом, а не push(...items):
 // спред раскладывает массив в аргументы вызова, а их число ограничено
 // (около 125 тысяч), и на ветке в сотни тысяч файлов слияние планов падало
@@ -410,8 +497,11 @@ async function buildRunPlan(srcRoot, dstRoot, folders, excludes, scan) {
   const conflicts = [];
   const skipped = [];
 
+  // Типы веток и их родителей — одной пачкой до разбора: см. statType.
+  const types = await prefetchTypes(srcRoot, dstRoot, folders);
+
   for (const folder of folders) {
-    const branch = await planForBranch(srcRoot, dstRoot, folder, excludes, scan);
+    const branch = await planForBranch(srcRoot, dstRoot, folder, excludes, scan, types);
     for (const key of Object.keys(merged)) appendAll(merged[key], branch.plan[key]);
     appendAll(srcDirs, branch.srcDirs);
     appendAll(dstDirs, branch.dstDirs);
@@ -509,6 +599,7 @@ module.exports = {
   countByFolder,
   scanFromIndex,
   groupIndexByBranch,
+  groupExcludesByBranch,
   statType,
   ancestorsOf,
 };
