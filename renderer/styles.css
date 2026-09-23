@@ -367,10 +367,25 @@ body {
   min-width: 0;
   padding-right: 4px;
 }
-.folder-list::-webkit-scrollbar {
+/* Все прокручиваемые списки, а не только деревья: у предпросмотра и истории
+   оставалась светлая системная полоса поверх тёмного стекла - видно на кадре
+   из tools/make-screenshots.js. */
+.folder-list::-webkit-scrollbar,
+.preview-list::-webkit-scrollbar,
+.history-list::-webkit-scrollbar,
+.hist-files::-webkit-scrollbar {
   width: 7px;
 }
-.folder-list::-webkit-scrollbar-thumb {
+.folder-list::-webkit-scrollbar-track,
+.preview-list::-webkit-scrollbar-track,
+.history-list::-webkit-scrollbar-track,
+.hist-files::-webkit-scrollbar-track {
+  background: transparent;
+}
+.folder-list::-webkit-scrollbar-thumb,
+.preview-list::-webkit-scrollbar-thumb,
+.history-list::-webkit-scrollbar-thumb,
+.hist-files::-webkit-scrollbar-thumb {
   background: rgba(255, 255, 255, 0.14);
   border-radius: 4px;
 }
