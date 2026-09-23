@@ -1,4 +1,18 @@
+<div align="center">
+
 # SyncGlass
+
+**Синхронизация папок между ноутбуком и сетевым компьютером. Приёмник становится точной копией источника, перемещения распознаются, а кнопка «Остановить» возвращает всё как было.**
+
+[Скачать для Windows](https://github.com/ALEXalesha/SynchronizationApp/releases/latest) &nbsp;·&nbsp; [English version of this file](README.md)
+
+[![CI](https://github.com/ALEXalesha/SynchronizationApp/actions/workflows/ci.yml/badge.svg)](https://github.com/ALEXalesha/SynchronizationApp/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/ALEXalesha/SynchronizationApp?color=16a34a)](https://github.com/ALEXalesha/SynchronizationApp/releases/latest)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
+<img src="docs/screenshots/window.png" width="860" alt="Два дерева: слева локальная папка с отметками, справа сетевая">
+
+</div>
 
 Настольное приложение (Windows, Electron) для синхронизации папок между
 ноутбуком и сетевым компьютером. Дизайн — liquid glass в стиле Apple.
@@ -923,3 +937,26 @@ npm test
   не видит, поэтому в синхронизацию она не попадёт.
 - Сравнение по размеру и дате, без побайтовой сверки/хешей. Содержимое читается
   только у кандидатов в перемещения, и то краями.
+
+## Кадры для README собираются программой
+
+`tools/make-screenshots.js` запускает настоящее приложение с отдельной
+временной папкой `userData`, чтобы не тронуть ни настройки, ни кеши, ни историю,
+и подкладывает две выдуманные папки: «Ноутбук» и «Сетевой ПК». Честно:
+«сетевая» сторона здесь — вторая локальная папка, настоящей шары у скрипта нет.
+Кадр берётся с самой страницы через `webContents.capturePage()`: снимок экрана
+тут не годится, в него может попасть чужое окно.
+
+```powershell
+npx electron tools/make-screenshots.js
+```
+
+<img src="docs/screenshots/preview.png" width="860" alt="Предпросмотр: сколько переместить, скопировать, перезаписать и удалить">
+
+Кадр предпросмотра заодно показал огрех: у его списка и у окна истории
+оставалась светлая системная полоса прокрутки поверх тёмного стекла. Стиль
+полосы был только у деревьев, теперь он у всех прокручиваемых списков.
+
+## Лицензия
+
+MIT, файл [LICENSE](LICENSE).
