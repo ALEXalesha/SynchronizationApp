@@ -90,6 +90,24 @@ function fmtNum(n) {
   return n.toLocaleString('ru-RU');
 }
 
+// Счётчик в плашке предпросмотра. Плашка узкая - четыре в ряд в окне 900 px, - а
+// счёт бывает шестизначным, и во время работы там стояло ещё «сделано/всего»:
+// такие числа вылезали за рамку. Теперь число с разрядами, шрифт уменьшается по
+// длине, «из N» идёт отдельной строкой, а перенос в любом месте (CSS) остаётся
+// последней страховкой. Точное значение - во всплывающей подсказке.
+function numSize(text) {
+  const n = text.length;
+  if (n > 11) return 'num-xs';
+  if (n > 7) return 'num-s';
+  if (n > 5) return 'num-m';
+  return '';
+}
+function statNum(value, total = null) {
+  const text = fmtNum(value);
+  const of = total === null ? '' : `<span class="of">из ${fmtNum(total)}</span>`;
+  return `<span class="num ${numSize(text)}" title="${text}">${text}</span>${of}`;
+}
+
 // Сторона-источник (там показываем чекбоксы).
 function sourceSide() {
   return state.direction === 'toNetwork' ? 'local' : 'network';
@@ -752,7 +770,7 @@ function renderPreview({ perFolder, totals, skipped = [], skippedTotal = 0 }) {
   // Перемещения показываем только когда они есть: в обычном прогоне их ноль,
   // и лишняя плашка только мешала бы.
   const moveStat = totals.move
-    ? `<div class="stat move"><span class="num">${totals.move}</span><span class="lbl">переместить</span></div>`
+    ? `<div class="stat move"><span class="val">${statNum(totals.move)}</span><span class="lbl">переместить</span></div>`
     : '';
   const dirsNote = totals.dirs
     ? `<div class="preview-note">Папок привести в порядок: ${totals.dirs}</div>`
@@ -768,18 +786,18 @@ function renderPreview({ perFolder, totals, skipped = [], skippedTotal = 0 }) {
     : '';
   el.previewSummary.innerHTML = `
     ${moveStat}
-    <div class="stat copy"><span class="num">${totals.copy}</span><span class="lbl">скопировать</span></div>
-    <div class="stat overwrite"><span class="num">${totals.overwrite}</span><span class="lbl">перезаписать</span></div>
-    <div class="stat trash"><span class="num">${totals.trash}</span><span class="lbl">${delLabel}</span></div>
+    <div class="stat copy"><span class="val">${statNum(totals.copy)}</span><span class="lbl">скопировать</span></div>
+    <div class="stat overwrite"><span class="val">${statNum(totals.overwrite)}</span><span class="lbl">перезаписать</span></div>
+    <div class="stat trash"><span class="val">${statNum(totals.trash)}</span><span class="lbl">${delLabel}</span></div>
     ${dirsNote}${warn}${skipNote}`;
 
   const row = (pf) => {
     const s = pf.summary;
     const parts = [];
-    if (s.move) parts.push(`→${s.move}`);
-    if (s.copy) parts.push(`+${s.copy}`);
-    if (s.overwrite) parts.push(`~${s.overwrite}`);
-    if (s.trash) parts.push(`−${s.trash}`);
+    if (s.move) parts.push(`→${fmtNum(s.move)}`);
+    if (s.copy) parts.push(`+${fmtNum(s.copy)}`);
+    if (s.overwrite) parts.push(`~${fmtNum(s.overwrite)}`);
+    if (s.trash) parts.push(`−${fmtNum(s.trash)}`);
     const counts = parts.length ? parts.join('  ') : 'без изменений';
     return `<li><span>${escapeHtml(pf.folder)}</span><span class="pv-counts">${counts}</span></li>`;
   };
@@ -869,10 +887,10 @@ async function runSync() {
 
   // Живой счётчик по действиям — цифры в плашках растут по ходу работы.
   const numEls = {
-    move: el.previewSummary.querySelector('.stat.move .num'),
-    copy: el.previewSummary.querySelector('.stat.copy .num'),
-    overwrite: el.previewSummary.querySelector('.stat.overwrite .num'),
-    trash: el.previewSummary.querySelector('.stat.trash .num'),
+    move: el.previewSummary.querySelector('.stat.move .val'),
+    copy: el.previewSummary.querySelector('.stat.copy .val'),
+    overwrite: el.previewSummary.querySelector('.stat.overwrite .val'),
+    trash: el.previewSummary.querySelector('.stat.trash .val'),
   };
   const unsubscribe = window.api.onSyncProgress(({ done, total, action, path, by }) => {
     if (action === 'rollback') return; // текст уже показан кнопкой остановки
@@ -881,7 +899,7 @@ async function runSync() {
     el.progressText.textContent = `${done}/${total} · ${ACTION_VERB[action] || ''} ${path}`;
     if (by) {
       for (const key of Object.keys(numEls)) {
-        if (numEls[key]) numEls[key].textContent = `${by[key]}/${lastPreviewTotals[key]}`;
+        if (numEls[key]) numEls[key].innerHTML = statNum(by[key], lastPreviewTotals[key]);
       }
     }
   });

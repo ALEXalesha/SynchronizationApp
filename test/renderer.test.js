@@ -383,3 +383,39 @@ test('без удалений предупреждение не показыва
   const html = summaryOf(0);
   assert.ok(!html.includes('безвозвратно'), 'пугать нечем: удалять нечего');
 });
+
+// Большие счётчики вылезали за плашки предпросмотра: плашка узкая (четыре в ряд
+// в окне 900 px), шестизначное число шрифтом 21 px в неё не входит, а во время
+// работы там ещё и «сделано/всего». Нашёл автор на своих папках.
+test('большие счётчики печатаются с разрядами и мельче', () => {
+  const { api } = fresh();
+  api.renderPreview({
+    perFolder: [{ folder: 'док', summary: { move: 0, copy: 1234567, overwrite: 98765, trash: 3, unchanged: 0, dirs: 0, total: 1333335 } }],
+    totals: { move: 0, copy: 1234567, overwrite: 98765, trash: 3, unchanged: 0, dirs: 0, total: 1333335 },
+  });
+  const html = api.el.previewSummary.innerHTML;
+  assert.ok(html.includes('1 234 567'), 'миллион с разрядами');
+  assert.ok(!html.includes('1234567'), 'без разрядов длинное число не читается');
+  assert.match(html, /class="num num-s"[^>]*>1 234 567/, 'длинное число - мельче');
+  assert.match(html, /class="num "[^>]*>3</, 'короткое - обычным шрифтом');
+});
+
+test('во время работы «из N» отдельной строкой, а не через косую', () => {
+  const { __ctx } = fresh().api;
+  const html = __ctx.statNum(12345, 67890);
+  assert.ok(html.includes('12 345') && html.includes('из 67 890'), html);
+  assert.ok(!html.replace(/<[^>]+>/g, '').includes('/'), 'через косую строка выходила вдвое длиннее');
+});
+
+test('размер шрифта плашки растёт вниз вместе с длиной числа', () => {
+  const { __ctx } = fresh().api;
+  const order = ['', 'num-m', 'num-s', 'num-xs'];
+  let prev = 0;
+  for (const n of [0, 7, 42, 999, 1000, 99999, 100000, 9999999, 10000000, 1e9, 1e12]) {
+    const cls = __ctx.numSize(__ctx.fmtNum(n));
+    const rank = order.indexOf(cls);
+    assert.ok(rank >= prev, `${n}: ${cls} крупнее, чем у числа поменьше`);
+    prev = rank;
+  }
+  assert.strictEqual(prev, 3, 'у самых длинных - самый мелкий шрифт');
+});

@@ -618,7 +618,7 @@ input[type="checkbox"]:indeterminate::after {
   flex-wrap: wrap;
 }
 .stat {
-  flex: 1;
+  flex: 1 1 0;
   min-width: 90px;
   padding: 11px;
   border-radius: var(--radius-sm);
@@ -626,10 +626,36 @@ input[type="checkbox"]:indeterminate::after {
   border: 1px solid rgba(255, 255, 255, 0.08);
   text-align: center;
 }
+.stat .val {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 30px;
+}
+/* Длинное число мельче (renderer.js, numSize), а перенос в любом месте - последняя
+   страховка: число не имеет права выйти за рамку плашки. */
 .stat .num {
   display: block;
   font-size: 21px;
   font-weight: 700;
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.stat .num.num-m {
+  font-size: 18px;
+}
+.stat .num.num-s {
+  font-size: 15px;
+}
+.stat .num.num-xs {
+  font-size: 12px;
+}
+.stat .of {
+  display: block;
+  font-size: 10px;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
 }
 .stat .lbl {
   font-size: 11px;

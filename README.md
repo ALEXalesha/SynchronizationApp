@@ -21,7 +21,7 @@
 The local folder is on the left, the network folder on the right. Tick what to sync on the source side, pick the direction, and press Sync. New files are copied, changed ones overwritten, and files that no longer exist on the source are deleted from the destination.
 
 - **Moves are recognised.** If a file or a whole folder was moved, the destination does the same by renaming instead of deleting and copying again. A pair is matched by size and name, counted only when the match is unique, and checked by content before it becomes a move.
-- **A preview comes first**: how many files will be moved, copied, overwritten and deleted, with a live counter while it runs. Nothing changes without confirmation.
+- **A preview comes first**: how many files will be moved, copied, overwritten and deleted, with a live counter while it runs. Nothing changes without confirmation. Large counts are printed with digit grouping and a smaller font, and "of N" goes on its own line while running: a six-digit count used to spill out of its tile (fixed in 1.0.1).
 - **Stop undoes the run.** Originals are not destroyed straight away: during the run they sit in a service folder `.sgundo` inside the destination and are thrown away in one go only at the very end. Stop brings back what was overwritten and deleted and removes what was copied; if a run crashed, the next start clears up after it.
 - **Folder-versus-file conflicts are resolved.** If `Reports` is a folder on one side and a file on the other, the destination clears the spot first and then puts the right thing there.
 - **Names are case-insensitive**, as in Windows itself: `Docs` and `docs` are the same folder.
@@ -38,7 +38,7 @@ npm install
 npm test
 ```
 
-179 tests in twelve files, all on `node --test` with no test dependencies. The logic lives in `src/` and is tested directly; `main.js` and `renderer.js` are loaded with Electron and the DOM stubbed, so no real Electron is needed.
+182 tests in twelve files, all on `node --test` with no test dependencies. The logic lives in `src/` and is tested directly; `main.js` and `renderer.js` are loaded with Electron and the DOM stubbed, so no real Electron is needed.
 
 Two files are worth copying:
 
