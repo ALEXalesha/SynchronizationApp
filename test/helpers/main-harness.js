@@ -12,8 +12,10 @@ const fsp = require('node:fs').promises;
 
 const APP_ROOT = path.join(__dirname, '..', '..');
 
-function electronStub(userDataDir, handlers, trashed, appEvents) {
+function electronStub(userDataDir, handlers, trashed, appEvents, windows) {
+  const display = { id: 1, workArea: { x: 0, y: 0, width: 1920, height: 1040 } };
   return {
+    screen: { getPrimaryDisplay: () => display, getAllDisplays: () => [display] },
     app: {
       getPath: () => userDataDir,
       requestSingleInstanceLock: () => true,
@@ -22,6 +24,7 @@ function electronStub(userDataDir, handlers, trashed, appEvents) {
       quit: () => {},
     },
     BrowserWindow: class {
+      constructor(options) { windows.push(options); }
       loadFile() {}
       on() {}
       isDestroyed() { return false; }
@@ -45,8 +48,12 @@ function electronStub(userDataDir, handlers, trashed, appEvents) {
 // call(channel, args) вызывает обработчик так же, как это делает preload.
 // fireApp(event) дёргает обработчик события самого приложения ('before-quit'):
 // без него всё, что происходит при закрытии окна, не проверялось ничем.
-async function loadMain() {
+// opts.seed(userData) - положить файлы в папку данных до старта main.js (окно
+// создаётся сразу при запуске, и то, что оно читает, должно лежать заранее).
+async function loadMain(opts = {}) {
   const userData = await fsp.mkdtemp(path.join(os.tmpdir(), 'syncglass-ud-'));
+  const windows = [];
+  if (opts.seed) await opts.seed(userData);
   const handlers = new Map();
   const appEvents = new Map();
   const trashed = [];
@@ -57,7 +64,7 @@ async function loadMain() {
     id: electronPath,
     filename: electronPath,
     loaded: true,
-    exports: electronStub(userData, handlers, trashed, appEvents),
+    exports: electronStub(userData, handlers, trashed, appEvents, windows),
   };
 
   const mainPath = require.resolve(path.join(APP_ROOT, 'main.js'));
@@ -75,7 +82,9 @@ async function loadMain() {
     if (!fn) throw new Error(`нет обработчика события: ${event}`);
     return fn();
   };
-  return { call, fireApp, sent, trashed, userData };
+  // Дать отработать whenReady().then(createWindow).
+  await new Promise((r) => setImmediate(r));
+  return { call, fireApp, sent, trashed, userData, windows };
 }
 
 const tmpDir = () => fsp.mkdtemp(path.join(os.tmpdir(), 'syncglass-ipc-'));

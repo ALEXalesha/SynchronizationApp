@@ -25,6 +25,7 @@ The local folder is on the left, the network folder on the right. Tick what to s
 - **Stop undoes the run.** Originals are not destroyed straight away: during the run they sit in a service folder `.sgundo` inside the destination and are thrown away in one go only at the very end. Stop brings back what was overwritten and deleted and removes what was copied; if a run crashed, the next start clears up after it.
 - **Folder-versus-file conflicts are resolved.** If `Reports` is a folder on one side and a file on the other, the destination clears the spot first and then puts the right thing there.
 - **Names are case-insensitive**, as in Windows itself: `Docs` and `docs` are the same folder.
+- **The window opens where it was closed** (1.1.0). The saved place is checked against the monitors present now: if that monitor has been unplugged, the window opens centred on the main one, and its title bar always stays on a screen. The rule is the same module as in the author's calculators and Paint Pro, with property tests over random screen layouts.
 - **An unreachable side blocks the run.** A missing folder reads as empty, and syncing against an empty side would delete everything on the other one.
 
 <img src="docs/screenshots/preview.png" width="860" alt="The preview: how many files to move, copy, overwrite and delete">
@@ -38,7 +39,7 @@ npm install
 npm test
 ```
 
-182 tests in twelve files, all on `node --test` with no test dependencies. The logic lives in `src/` and is tested directly; `main.js` and `renderer.js` are loaded with Electron and the DOM stubbed, so no real Electron is needed.
+190 tests in thirteen files, all on `node --test` with no test dependencies. The logic lives in `src/` and is tested directly; `main.js` and `renderer.js` are loaded with Electron and the DOM stubbed, so no real Electron is needed.
 
 Two files are worth copying:
 

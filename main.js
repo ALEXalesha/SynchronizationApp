@@ -1,6 +1,6 @@
 'use strict';
 
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, screen } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const fsp = require('fs').promises;
@@ -12,6 +12,11 @@ const {
   buildRunPlan, countByFolder, scanFromIndex, groupIndexByBranch, groupExcludesByBranch,
 } = require('./src/plan');
 const { rootsOverlap, ciKey } = require('./src/paths');
+const WindowState = require('./src/window-state');
+
+// Место окна между запусками: userData\window-state.json. Размер у окна постоянный.
+const WINDOW_SIZE = { width: 900, height: 600, minWidth: 900, minHeight: 600 };
+const windowStatePath = () => path.join(app.getPath('userData'), 'window-state.json');
 
 let mainWindow;
 
@@ -342,9 +347,19 @@ async function cleanupTempFiles() {
 }
 
 function createWindow() {
+  // Окно открывается там, где его закрыли. Сохранённое место проверяется по нынешним
+  // мониторам: монитор отключили - окно по центру основного, заголовок всегда на экране.
+  const primary = screen.getPrimaryDisplay();
+  const areas = [primary, ...screen.getAllDisplays().filter((d) => d.id !== primary.id)].map((d) => d.workArea);
+  // Размер из файла не в счёт: окно всегда 900x600, и придвигать к краю надо его, а не
+  // то, что там записано (иначе окно с «чужим» размером в файле уезжало вверх).
+  const saved = WindowState.load(windowStatePath());
+  const fixed = saved && typeof saved === 'object' ? { ...saved, width: WINDOW_SIZE.width, height: WINDOW_SIZE.height } : saved;
+  const placed = WindowState.restore(fixed, areas, WINDOW_SIZE);
   mainWindow = new BrowserWindow({
-    width: 900,
-    height: 600,
+    ...(placed.x !== undefined ? { x: placed.x, y: placed.y } : {}),
+    width: WINDOW_SIZE.width,
+    height: WINDOW_SIZE.height,
     resizable: false,
     maximizable: false,
     fullscreenable: false,
@@ -356,6 +371,15 @@ function createWindow() {
       nodeIntegration: false,
     },
   });
+
+  // Место пишется после каждого перемещения (событие приходит один раз в конце
+  // перетаскивания) и при закрытии; запись - через временный файл.
+  const win = mainWindow;
+  const remember = () => {
+    if (!win.isDestroyed() && !win.isMinimized()) WindowState.save(windowStatePath(), WindowState.capture(win));
+  };
+  win.on('moved', remember);
+  win.on('close', remember);
 
   // Без этого ссылка переживает само окно, и обработчик второго экземпляра
   // дёргает уничтоженный объект — Электрон отвечает на это исключением.
