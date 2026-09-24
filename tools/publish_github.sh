@@ -80,7 +80,8 @@ gh auth setup-git
 git push github github-main:main --force
 
 if [ -n "$TAG" ]; then
-  git tag -f "$TAG" github-main
-  git push github "refs/tags/$TAG" --force
+  # Тег ставится прямо на GitHub, без локального: локальный указывал бы на
+  # переписанный коммит github-main и путался с тегами Gitea.
+  git push github "+github-main:refs/tags/$TAG"
   echo "тег $TAG отправлен"
 fi
