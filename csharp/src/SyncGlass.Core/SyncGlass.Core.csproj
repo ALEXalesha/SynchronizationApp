@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Ядро SyncGlass без окна: перенос src/*.js и логики main.js. Окна тут нет
+       намеренно - законы гоняют ядро тысячами прогонов, как JS-тесты зовут src/. -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>SyncGlass.Core</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="SyncGlass.Tests" />
+  </ItemGroup>
+
+</Project>
