@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Кадры C#-окна для README: программой, как tools/make-screenshots.js у Electron.
+       dotnet run -\-project csharp/tools/SyncGlass.Screenshots -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\SyncGlass.Wpf\SyncGlass.Wpf.csproj" />
+  </ItemGroup>
+
+</Project>

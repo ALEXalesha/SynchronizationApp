@@ -1,0 +1,616 @@
+<Window x:Class="SyncGlass.Wpf.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:SyncGlass.Wpf"
+        xmlns:ui="clr-namespace:SyncGlass.Ui;assembly=SyncGlass.Ui"
+        Title="SyncGlass" Width="900" Height="600" ResizeMode="CanMinimize"
+        WindowStartupLocation="CenterScreen" Background="#1C2128"
+        FontFamily="Segoe UI" FontSize="13" Foreground="{StaticResource Text}"
+        TextOptions.TextFormattingMode="Display" UseLayoutRounding="True">
+    <Window.Resources>
+        <BooleanToVisibilityConverter x:Key="BoolVis" />
+        <local:InverseBoolVisibility x:Key="NotVis" />
+        <local:NullCollapsed x:Key="NullVis" />
+        <local:TailTrim x:Key="Tail" />
+        <local:DirectionIs x:Key="DirIs" />
+
+        <!-- Точка статуса: цвет по виду; во время загрузки мигает -->
+        <Style x:Key="StatusDot" TargetType="Ellipse">
+            <Setter Property="Width" Value="8" />
+            <Setter Property="Height" Value="8" />
+            <Setter Property="Fill" Value="{StaticResource TextDim}" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding StatusKind}" Value="done">
+                    <Setter Property="Fill" Value="{StaticResource Ok}" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding StatusKind}" Value="error">
+                    <Setter Property="Fill" Value="{StaticResource Danger}" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding StatusKind}" Value="busy">
+                    <Setter Property="Fill" Value="{StaticResource Accent}" />
+                    <DataTrigger.EnterActions>
+                        <BeginStoryboard x:Name="Pulse">
+                            <Storyboard RepeatBehavior="Forever" AutoReverse="True">
+                                <DoubleAnimation Storyboard.TargetProperty="Opacity" From="1" To="0.35" Duration="0:0:0.55" />
+                            </Storyboard>
+                        </BeginStoryboard>
+                    </DataTrigger.EnterActions>
+                    <DataTrigger.ExitActions>
+                        <StopStoryboard BeginStoryboardName="Pulse" />
+                    </DataTrigger.ExitActions>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
+        <!-- Точка связи у заголовка панели: пусто без пути, зелёная, красная -->
+        <Style x:Key="ConnDot" TargetType="Ellipse">
+            <Setter Property="Width" Value="7" />
+            <Setter Property="Height" Value="7" />
+            <Setter Property="Margin" Value="6,0,0,0" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="Fill" Value="Transparent" />
+        </Style>
+
+        <!-- Строка дерева: общий вид; сторона задаётся шаблоном ниже -->
+        <Style x:Key="RowBorder" TargetType="Border">
+            <Setter Property="CornerRadius" Value="7" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="BorderBrush" Value="Transparent" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Margin" Value="0,0,0,2" />
+            <Setter Property="MinHeight" Value="30" />
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="{StaticResource Hover}" />
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="Caret" TargetType="TextBlock">
+            <Setter Property="Width" Value="14" />
+            <Setter Property="FontSize" Value="10" />
+            <Setter Property="TextAlignment" Value="Center" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="Foreground" Value="{StaticResource TextDim}" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Background" Value="Transparent" />
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Foreground" Value="{StaticResource Text}" />
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="RowName" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="12.5" />
+            <Setter Property="FontWeight" Value="Medium" />
+            <Setter Property="TextTrimming" Value="CharacterEllipsis" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding IsDir}" Value="False">
+                    <Setter Property="FontWeight" Value="Normal" />
+                    <Setter Property="Foreground" Value="{StaticResource TextDim}" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding IsPlaceholder}" Value="True">
+                    <Setter Property="FontStyle" Value="Italic" />
+                    <Setter Property="FontSize" Value="12" />
+                    <Setter Property="FontWeight" Value="Normal" />
+                    <Setter Property="Foreground" Value="{StaticResource TextFaint}" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
+        <DataTemplate x:Key="LocalRow" DataType="{x:Type ui:TreeRow}">
+            <Border x:Name="Row" Style="{StaticResource RowBorder}" Tag="local" MouseLeftButtonUp="Row_Click">
+                <DockPanel Margin="{Binding Indent, Converter={x:Static local:LeftPad.Instance}}" LastChildFill="True">
+                    <Grid DockPanel.Dock="Left" Width="14" Margin="0,0,8,0">
+                        <TextBlock Style="{StaticResource Caret}" Text="{Binding Caret}" MouseLeftButtonUp="Caret_Click" />
+                        <local:Spinner Visibility="{Binding IsLoading, Converter={StaticResource BoolVis}}" />
+                    </Grid>
+                    <CheckBox DockPanel.Dock="Left" Style="{StaticResource GlassCheck}" IsHitTestVisible="False" Margin="0,0,8,0"
+                              IsThreeState="True" IsChecked="{Binding IsChecked, Mode=OneWay}"
+                              Visibility="{Binding DataContext.LocalIsSource, RelativeSource={RelativeSource AncestorType=Window}, Converter={StaticResource BoolVis}}" />
+                    <TextBlock DockPanel.Dock="Right" Text="{Binding LocalMeta}" FontSize="11" Foreground="{StaticResource TextDim}" VerticalAlignment="Center" Margin="8,0,8,0">
+                        <TextBlock.Style>
+                            <Style TargetType="TextBlock">
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding LocalDim}" Value="True">
+                                        <Setter Property="Opacity" Value="0.45" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </TextBlock.Style>
+                    </TextBlock>
+                    <TextBlock DockPanel.Dock="Left" Text="📄" FontSize="11" Opacity="0.6" Margin="0,0,5,0" VerticalAlignment="Center">
+                        <TextBlock.Style>
+                            <Style TargetType="TextBlock">
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsDir}" Value="True"><Setter Property="Visibility" Value="Collapsed" /></DataTrigger>
+                                    <DataTrigger Binding="{Binding IsPlaceholder}" Value="True"><Setter Property="Visibility" Value="Collapsed" /></DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </TextBlock.Style>
+                    </TextBlock>
+                    <TextBlock Style="{StaticResource RowName}" Text="{Binding Name}" />
+                </DockPanel>
+            </Border>
+            <DataTemplate.Triggers>
+                <DataTrigger Binding="{Binding HasLocal}" Value="False">
+                    <Setter TargetName="Row" Property="Opacity" Value="0.4" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding IsPlaceholder}" Value="True">
+                    <Setter TargetName="Row" Property="Opacity" Value="1" />
+                </DataTrigger>
+                <MultiDataTrigger>
+                    <MultiDataTrigger.Conditions>
+                        <Condition Binding="{Binding Check}" Value="Checked" />
+                        <Condition Binding="{Binding DataContext.LocalIsSource, RelativeSource={RelativeSource AncestorType=Window}}" Value="True" />
+                    </MultiDataTrigger.Conditions>
+                    <Setter TargetName="Row" Property="Background" Value="{StaticResource RowChecked}" />
+                    <Setter TargetName="Row" Property="BorderBrush" Value="{StaticResource RowCheckedBorder}" />
+                </MultiDataTrigger>
+                <MultiDataTrigger>
+                    <MultiDataTrigger.Conditions>
+                        <Condition Binding="{Binding Check}" Value="Partial" />
+                        <Condition Binding="{Binding DataContext.LocalIsSource, RelativeSource={RelativeSource AncestorType=Window}}" Value="True" />
+                    </MultiDataTrigger.Conditions>
+                    <Setter TargetName="Row" Property="Background" Value="{StaticResource RowPartial}" />
+                    <Setter TargetName="Row" Property="BorderBrush" Value="{StaticResource RowPartialBorder}" />
+                </MultiDataTrigger>
+            </DataTemplate.Triggers>
+        </DataTemplate>
+
+        <DataTemplate x:Key="NetworkRow" DataType="{x:Type ui:TreeRow}">
+            <Border x:Name="Row" Style="{StaticResource RowBorder}" Tag="network" MouseLeftButtonUp="Row_Click">
+                <DockPanel Margin="{Binding Indent, Converter={x:Static local:LeftPad.Instance}}" LastChildFill="True">
+                    <Grid DockPanel.Dock="Left" Width="14" Margin="0,0,8,0">
+                        <TextBlock Style="{StaticResource Caret}" Text="{Binding Caret}" MouseLeftButtonUp="Caret_Click" />
+                        <local:Spinner Visibility="{Binding IsLoading, Converter={StaticResource BoolVis}}" />
+                    </Grid>
+                    <CheckBox DockPanel.Dock="Left" Style="{StaticResource GlassCheck}" IsHitTestVisible="False" Margin="0,0,8,0"
+                              IsThreeState="True" IsChecked="{Binding IsChecked, Mode=OneWay}"
+                              Visibility="{Binding DataContext.NetworkIsSource, RelativeSource={RelativeSource AncestorType=Window}, Converter={StaticResource BoolVis}}" />
+                    <TextBlock DockPanel.Dock="Right" Text="{Binding NetworkMeta}" FontSize="11" Foreground="{StaticResource TextDim}" VerticalAlignment="Center" Margin="8,0,8,0">
+                        <TextBlock.Style>
+                            <Style TargetType="TextBlock">
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding NetworkDim}" Value="True">
+                                        <Setter Property="Opacity" Value="0.45" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </TextBlock.Style>
+                    </TextBlock>
+                    <TextBlock DockPanel.Dock="Left" Text="📄" FontSize="11" Opacity="0.6" Margin="0,0,5,0" VerticalAlignment="Center">
+                        <TextBlock.Style>
+                            <Style TargetType="TextBlock">
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsDir}" Value="True"><Setter Property="Visibility" Value="Collapsed" /></DataTrigger>
+                                    <DataTrigger Binding="{Binding IsPlaceholder}" Value="True"><Setter Property="Visibility" Value="Collapsed" /></DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </TextBlock.Style>
+                    </TextBlock>
+                    <TextBlock Style="{StaticResource RowName}" Text="{Binding Name}" />
+                </DockPanel>
+            </Border>
+            <DataTemplate.Triggers>
+                <DataTrigger Binding="{Binding HasNetwork}" Value="False">
+                    <Setter TargetName="Row" Property="Opacity" Value="0.4" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding IsPlaceholder}" Value="True">
+                    <Setter TargetName="Row" Property="Opacity" Value="1" />
+                </DataTrigger>
+                <MultiDataTrigger>
+                    <MultiDataTrigger.Conditions>
+                        <Condition Binding="{Binding Check}" Value="Checked" />
+                        <Condition Binding="{Binding DataContext.NetworkIsSource, RelativeSource={RelativeSource AncestorType=Window}}" Value="True" />
+                    </MultiDataTrigger.Conditions>
+                    <Setter TargetName="Row" Property="Background" Value="{StaticResource RowChecked}" />
+                    <Setter TargetName="Row" Property="BorderBrush" Value="{StaticResource RowCheckedBorder}" />
+                </MultiDataTrigger>
+                <MultiDataTrigger>
+                    <MultiDataTrigger.Conditions>
+                        <Condition Binding="{Binding Check}" Value="Partial" />
+                        <Condition Binding="{Binding DataContext.NetworkIsSource, RelativeSource={RelativeSource AncestorType=Window}}" Value="True" />
+                    </MultiDataTrigger.Conditions>
+                    <Setter TargetName="Row" Property="Background" Value="{StaticResource RowPartial}" />
+                    <Setter TargetName="Row" Property="BorderBrush" Value="{StaticResource RowPartialBorder}" />
+                </MultiDataTrigger>
+            </DataTemplate.Triggers>
+        </DataTemplate>
+
+        <!-- Плашка счётчика в предпросмотре: шрифт мельчает по длине числа -->
+        <DataTemplate x:Key="Stat" DataType="{x:Type ui:StatItem}">
+            <Border Margin="4,0" Padding="11" CornerRadius="7" Background="#0AFFFFFF" BorderBrush="#14FFFFFF" BorderThickness="1" MinWidth="90">
+                <StackPanel>
+                    <TextBlock x:Name="Num" Text="{Binding Value}" ToolTip="{Binding Value}" FontSize="21" FontWeight="Bold"
+                               HorizontalAlignment="Center" TextWrapping="Wrap" TextAlignment="Center" MinHeight="26" />
+                    <TextBlock Text="{Binding Of}" FontSize="10" Foreground="{StaticResource TextDim}" HorizontalAlignment="Center"
+                               Visibility="{Binding Of, Converter={StaticResource NullVis}}" />
+                    <TextBlock Text="{Binding Label}" FontSize="11" Foreground="{StaticResource TextDim}" HorizontalAlignment="Center" />
+                </StackPanel>
+            </Border>
+            <DataTemplate.Triggers>
+                <DataTrigger Binding="{Binding Kind}" Value="copy"><Setter TargetName="Num" Property="Foreground" Value="{StaticResource Accent}" /></DataTrigger>
+                <DataTrigger Binding="{Binding Kind}" Value="overwrite"><Setter TargetName="Num" Property="Foreground" Value="{StaticResource Amber}" /></DataTrigger>
+                <DataTrigger Binding="{Binding Kind}" Value="trash"><Setter TargetName="Num" Property="Foreground" Value="{StaticResource Danger}" /></DataTrigger>
+                <DataTrigger Binding="{Binding Kind}" Value="move"><Setter TargetName="Num" Property="Foreground" Value="{StaticResource Ok}" /></DataTrigger>
+                <DataTrigger Binding="{Binding SizeClass}" Value="num-m"><Setter TargetName="Num" Property="FontSize" Value="18" /></DataTrigger>
+                <DataTrigger Binding="{Binding SizeClass}" Value="num-s"><Setter TargetName="Num" Property="FontSize" Value="15" /></DataTrigger>
+                <DataTrigger Binding="{Binding SizeClass}" Value="num-xs"><Setter TargetName="Num" Property="FontSize" Value="12" /></DataTrigger>
+            </DataTemplate.Triggers>
+        </DataTemplate>
+
+        <!-- Цвета частей: счётчики истории, строки файлов, значки -->
+        <Style x:Key="PartText" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{StaticResource TextDim}" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding Kind}" Value="copy"><Setter Property="Foreground" Value="{StaticResource Accent}" /></DataTrigger>
+                <DataTrigger Binding="{Binding Kind}" Value="overwrite"><Setter Property="Foreground" Value="{StaticResource Amber}" /></DataTrigger>
+                <DataTrigger Binding="{Binding Kind}" Value="trash"><Setter Property="Foreground" Value="{StaticResource Danger}" /></DataTrigger>
+                <DataTrigger Binding="{Binding Kind}" Value="move"><Setter Property="Foreground" Value="{StaticResource Ok}" /></DataTrigger>
+                <DataTrigger Binding="{Binding Kind}" Value="danger"><Setter Property="Foreground" Value="{StaticResource Danger}" /></DataTrigger>
+                <DataTrigger Binding="{Binding Kind}" Value="warn"><Setter Property="Foreground" Value="{StaticResource Amber}" /></DataTrigger>
+                <DataTrigger Binding="{Binding Kind}" Value="none"><Setter Property="Foreground" Value="{StaticResource Text}" /></DataTrigger>
+                <DataTrigger Binding="{Binding Kind}" Value="muted">
+                    <Setter Property="Foreground" Value="{StaticResource TextFaint}" />
+                    <Setter Property="FontStyle" Value="Italic" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+    </Window.Resources>
+
+    <Grid>
+        <!-- Фон: тёмный графит и две едва заметные холодные подсветки, без анимации -->
+        <Grid.Background>
+            <LinearGradientBrush StartPoint="0.33,0" EndPoint="0.67,1">
+                <GradientStop Color="#1C2128" Offset="0" />
+                <GradientStop Color="#21262E" Offset="0.6" />
+                <GradientStop Color="#1A1F26" Offset="1" />
+            </LinearGradientBrush>
+        </Grid.Background>
+        <Canvas IsHitTestVisible="False" ClipToBounds="True">
+            <Ellipse Width="560" Height="560" Canvas.Left="-170" Canvas.Top="-210">
+                <Ellipse.Fill>
+                    <RadialGradientBrush>
+                        <GradientStop Color="#244A6C8F" Offset="0" />
+                        <GradientStop Color="#004A6C8F" Offset="1" />
+                    </RadialGradientBrush>
+                </Ellipse.Fill>
+            </Ellipse>
+            <Ellipse Width="620" Height="620" Canvas.Left="590" Canvas.Top="250">
+                <Ellipse.Fill>
+                    <RadialGradientBrush>
+                        <GradientStop Color="#243F5A72" Offset="0" />
+                        <GradientStop Color="#003F5A72" Offset="1" />
+                    </RadialGradientBrush>
+                </Ellipse.Fill>
+            </Ellipse>
+        </Canvas>
+
+        <Grid Margin="10">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <!-- Верхняя панель -->
+            <Border Style="{StaticResource Glass}" Padding="14,9">
+                <DockPanel>
+                    <StackPanel DockPanel.Dock="Left" Orientation="Horizontal" VerticalAlignment="Center">
+                        <Border Width="20" Height="20" CornerRadius="5" Background="{StaticResource Accent}" />
+                        <TextBlock Text="SyncGlass" FontSize="15" FontWeight="SemiBold" Margin="9,0,0,0" VerticalAlignment="Center" />
+                    </StackPanel>
+                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                        <Button Style="{StaticResource GhostButton}" Content="🕘 История" ToolTip="История синхронизаций" Click="History_Click" />
+                        <Button Style="{StaticResource GhostButton}" Content="⟳ Обновить" ToolTip="Пересканировать папки" Margin="10,0,0,0" Click="Refresh_Click" />
+                    </StackPanel>
+                    <Border HorizontalAlignment="Center" Background="#40000000" CornerRadius="7" BorderBrush="#0FFFFFFF" BorderThickness="1" Padding="3">
+                        <StackPanel Orientation="Horizontal">
+                            <RadioButton Style="{StaticResource DirButton}" GroupName="dir" Tag="toNetwork" Checked="Dir_Checked"
+                                         IsChecked="{Binding Direction, Mode=OneWay, Converter={StaticResource DirIs}, ConverterParameter=toNetwork}">
+                                <TextBlock>Локально <Run Text="→" Foreground="{StaticResource TextDim}" /> Сеть</TextBlock>
+                            </RadioButton>
+                            <RadioButton Style="{StaticResource DirButton}" GroupName="dir" Tag="toLocal" Margin="3,0,0,0" Checked="Dir_Checked"
+                                         IsChecked="{Binding Direction, Mode=OneWay, Converter={StaticResource DirIs}, ConverterParameter=toLocal}">
+                                <TextBlock>Сеть <Run Text="→" Foreground="{StaticResource TextDim}" /> Локально</TextBlock>
+                            </RadioButton>
+                        </StackPanel>
+                    </Border>
+                </DockPanel>
+            </Border>
+
+            <!-- Статус-бар: фоновая загрузка и настройки отображения -->
+            <Border Grid.Row="1" Style="{StaticResource Glass}" Margin="0,10,0,0" ClipToBounds="True">
+                <Grid>
+                    <DockPanel Margin="14,6">
+                        <Ellipse DockPanel.Dock="Left" Style="{StaticResource StatusDot}" Margin="0,0,9,0" />
+                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                            <TextBlock Text="Размеры" Style="{StaticResource Dim}" VerticalAlignment="Center" Margin="12,0,6,0"
+                                       ToolTip="Подсчёт размеров и числа файлов в фоне. «До 300k» — безопасный предел; «Все» — без ограничения (нужно больше памяти)." />
+                            <ComboBox x:Name="SizeModeBox" Style="{StaticResource GlassCombo}" SelectedValuePath="Tag"
+                                      SelectedValue="{Binding SizeMode, Mode=OneWay}" SelectionChanged="SizeMode_Changed">
+                                <ComboBoxItem Tag="off" Content="Выкл" />
+                                <ComboBoxItem Tag="capped" Content="До 300k" />
+                                <ComboBoxItem Tag="full" Content="Все" />
+                            </ComboBox>
+                            <TextBlock Text="Сортировка" Style="{StaticResource Dim}" VerticalAlignment="Center" Margin="12,0,6,0" ToolTip="Порядок в дереве" />
+                            <ComboBox x:Name="SortBox" Style="{StaticResource GlassCombo}" SelectedValuePath="Tag"
+                                      SelectedValue="{Binding Sort, Mode=OneWay}" SelectionChanged="Sort_Changed">
+                                <ComboBoxItem Tag="name" Content="По имени" />
+                                <ComboBoxItem Tag="date" Content="По дате" />
+                            </ComboBox>
+                        </StackPanel>
+                        <TextBlock DockPanel.Dock="Right" Text="{Binding StatusSummary}" Foreground="{StaticResource TextDim}" FontSize="12.5" VerticalAlignment="Center" Margin="9,0,0,0" />
+                        <TextBlock Text="{Binding StatusText}" FontSize="12.5" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                    </DockPanel>
+                    <local:RunningBar VerticalAlignment="Bottom" Height="2" Visibility="{Binding StatusBusy, Converter={StaticResource BoolVis}}" />
+                </Grid>
+            </Border>
+
+            <!-- Две панели со списками -->
+            <Grid Grid.Row="2" Margin="0,10,0,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="10" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+
+                <Border Style="{StaticResource Glass}" Padding="12">
+                    <DockPanel>
+                        <DockPanel DockPanel.Dock="Top" Margin="0,0,0,8">
+                            <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
+                                <TextBlock Text="Локально" FontWeight="SemiBold" />
+                                <Ellipse>
+                                    <Ellipse.Style>
+                                        <Style TargetType="Ellipse" BasedOn="{StaticResource ConnDot}">
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding LocalConn}" Value="True"><Setter Property="Fill" Value="{StaticResource Ok}" /><Setter Property="ToolTip" Value="доступно" /></DataTrigger>
+                                                <DataTrigger Binding="{Binding LocalConn}" Value="False"><Setter Property="Fill" Value="{StaticResource Danger}" /><Setter Property="ToolTip" Value="недоступно" /></DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Ellipse.Style>
+                                </Ellipse>
+                            </StackPanel>
+                            <TextBlock Text="{Binding LocalPathLabel, Converter={StaticResource Tail}}" ToolTip="{Binding LocalPathLabel}" FontSize="11"
+                                       Foreground="{StaticResource TextDim}" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="10,0,0,0" />
+                        </DockPanel>
+                        <Border DockPanel.Dock="Top" BorderBrush="#14FFFFFF" BorderThickness="0,0,0,1" Padding="2,4,2,8" Margin="0,0,0,6" MinHeight="26">
+                            <Grid>
+                                <DockPanel Visibility="{Binding LocalIsSource, Converter={StaticResource BoolVis}}">
+                                    <TextBlock DockPanel.Dock="Right" Text="{Binding SelectedCountText}" Style="{StaticResource Dim}" VerticalAlignment="Center" />
+                                    <CheckBox Style="{StaticResource GlassCheck}" IsChecked="{Binding AllChecked, Mode=OneWay}" Click="SelectAll_Click">
+                                        <TextBlock Text="Выбрать все" FontSize="12.5" />
+                                    </CheckBox>
+                                </DockPanel>
+                                <TextBlock Text="отмечайте на стороне-источнике" Style="{StaticResource Dim}" VerticalAlignment="Center"
+                                           Visibility="{Binding LocalIsSource, Converter={StaticResource NotVis}}" />
+                            </Grid>
+                        </Border>
+                        <Grid>
+                            <ListBox x:Name="LocalList" Style="{StaticResource PlainList}" ItemsSource="{Binding Rows}" ItemTemplate="{StaticResource LocalRow}" />
+                            <TextBlock Text="{Binding EmptyText}" Foreground="{StaticResource TextDim}" FontSize="12.5" HorizontalAlignment="Center" Margin="0,24,0,0"
+                                       Visibility="{Binding EmptyText, Converter={StaticResource NullVis}}" />
+                        </Grid>
+                    </DockPanel>
+                </Border>
+
+                <Border Grid.Column="2" Style="{StaticResource Glass}" Padding="12">
+                    <DockPanel>
+                        <DockPanel DockPanel.Dock="Top" Margin="0,0,0,8">
+                            <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
+                                <TextBlock Text="Сеть" FontWeight="SemiBold" />
+                                <Ellipse>
+                                    <Ellipse.Style>
+                                        <Style TargetType="Ellipse" BasedOn="{StaticResource ConnDot}">
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding NetworkConn}" Value="True"><Setter Property="Fill" Value="{StaticResource Ok}" /><Setter Property="ToolTip" Value="доступно" /></DataTrigger>
+                                                <DataTrigger Binding="{Binding NetworkConn}" Value="False"><Setter Property="Fill" Value="{StaticResource Danger}" /><Setter Property="ToolTip" Value="недоступно" /></DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Ellipse.Style>
+                                </Ellipse>
+                            </StackPanel>
+                            <TextBlock Text="{Binding NetworkPathLabel, Converter={StaticResource Tail}}" ToolTip="{Binding NetworkPathLabel}" FontSize="11"
+                                       Foreground="{StaticResource TextDim}" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="10,0,0,0" />
+                        </DockPanel>
+                        <Border DockPanel.Dock="Top" BorderBrush="#14FFFFFF" BorderThickness="0,0,0,1" Padding="2,4,2,8" Margin="0,0,0,6" MinHeight="26">
+                            <Grid>
+                                <DockPanel Visibility="{Binding NetworkIsSource, Converter={StaticResource BoolVis}}">
+                                    <TextBlock DockPanel.Dock="Right" Text="{Binding SelectedCountText}" Style="{StaticResource Dim}" VerticalAlignment="Center" />
+                                    <CheckBox Style="{StaticResource GlassCheck}" IsChecked="{Binding AllChecked, Mode=OneWay}" Click="SelectAll_Click">
+                                        <TextBlock Text="Выбрать все" FontSize="12.5" />
+                                    </CheckBox>
+                                </DockPanel>
+                                <TextBlock Text="отмечайте на стороне-источнике" Style="{StaticResource Dim}" VerticalAlignment="Center"
+                                           Visibility="{Binding NetworkIsSource, Converter={StaticResource NotVis}}" />
+                            </Grid>
+                        </Border>
+                        <Grid>
+                            <ListBox x:Name="NetworkList" Style="{StaticResource PlainList}" ItemsSource="{Binding Rows}" ItemTemplate="{StaticResource NetworkRow}" />
+                            <TextBlock Text="{Binding EmptyText}" Foreground="{StaticResource TextDim}" FontSize="12.5" HorizontalAlignment="Center" Margin="0,24,0,0"
+                                       Visibility="{Binding EmptyText, Converter={StaticResource NullVis}}" />
+                        </Grid>
+                    </DockPanel>
+                </Border>
+            </Grid>
+
+            <!-- Нижняя панель: пути и синхронизация -->
+            <Border Grid.Row="3" Style="{StaticResource Glass}" Margin="0,10,0,0" Padding="14,11">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="12" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="12" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel>
+                        <TextBlock Text="Локальная папка" FontSize="11" Foreground="{StaticResource TextDim}" Margin="2,0,0,5" />
+                        <DockPanel>
+                            <Button DockPanel.Dock="Right" Style="{StaticResource GlassButton}" Content="Обзор…" Margin="6,0,0,0" Tag="local" Click="Pick_Click" />
+                            <TextBox Style="{StaticResource PathBox}" Text="{Binding LocalPath, Mode=OneWay}" />
+                        </DockPanel>
+                    </StackPanel>
+                    <StackPanel Grid.Column="2">
+                        <TextBlock Text="Сетевая папка" FontSize="11" Foreground="{StaticResource TextDim}" Margin="2,0,0,5" />
+                        <DockPanel>
+                            <Button DockPanel.Dock="Right" Style="{StaticResource GlassButton}" Content="Обзор…" Margin="6,0,0,0" Tag="network" Click="Pick_Click" />
+                            <TextBox Style="{StaticResource PathBox}" Text="{Binding NetworkPath, Mode=OneWay}" />
+                        </DockPanel>
+                    </StackPanel>
+                    <Button Grid.Column="4" Style="{StaticResource PrimaryButton}" Content="Синхронизировать" VerticalAlignment="Bottom"
+                            Padding="22,9" FontSize="13" FontWeight="SemiBold" IsEnabled="{Binding CanSync}" Click="Sync_Click" />
+                </Grid>
+            </Border>
+        </Grid>
+
+        <!-- Слой предпросмотра -->
+        <Grid Background="#8C0C0F14" DataContext="{Binding Preview}" Visibility="{Binding IsOpen, Converter={StaticResource BoolVis}}">
+            <Border Style="{StaticResource Glass}" Background="#F2242A33" Width="480" MaxHeight="504" Padding="20" VerticalAlignment="Center" HorizontalAlignment="Center">
+                <DockPanel>
+                    <TextBlock DockPanel.Dock="Top" Text="{Binding Title}" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,13" />
+                    <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,13,0,0">
+                        <Button Style="{StaticResource GhostButton}" Content="{Binding CancelText}" IsEnabled="{Binding CancelEnabled}" Click="PreviewCancel_Click" />
+                        <Button Style="{StaticResource PrimaryButton}" Content="{Binding ConfirmText}" IsEnabled="{Binding ConfirmEnabled}" Margin="10,0,0,0" Click="PreviewConfirm_Click" />
+                    </StackPanel>
+                    <StackPanel DockPanel.Dock="Bottom" Margin="0,13,0,0" Visibility="{Binding ProgressVisible, Converter={StaticResource BoolVis}}">
+                        <Grid Height="6">
+                            <Border Background="#4D000000" CornerRadius="3" />
+                            <ProgressBar Value="{Binding ProgressPercent}" Maximum="100" Height="6" Background="Transparent" BorderThickness="0"
+                                         Foreground="{StaticResource Accent}" Visibility="{Binding ProgressIndeterminate, Converter={StaticResource NotVis}}" />
+                            <local:RunningBar Visibility="{Binding ProgressIndeterminate, Converter={StaticResource BoolVis}}" />
+                        </Grid>
+                        <TextBlock Text="{Binding ProgressText}" FontSize="11.5" Foreground="{StaticResource TextDim}" HorizontalAlignment="Center"
+                                   TextTrimming="CharacterEllipsis" Margin="0,7,0,0" />
+                    </StackPanel>
+                    <StackPanel DockPanel.Dock="Top">
+                        <UniformGrid Rows="1" Margin="-4,0" Visibility="{Binding StatsVisible, Converter={StaticResource BoolVis}}">
+                            <ContentPresenter Content="{Binding Move}" ContentTemplate="{StaticResource Stat}" Visibility="{Binding MoveVisible, Converter={StaticResource BoolVis}}" />
+                            <ContentPresenter Content="{Binding Copy}" ContentTemplate="{StaticResource Stat}" />
+                            <ContentPresenter Content="{Binding Overwrite}" ContentTemplate="{StaticResource Stat}" />
+                            <ContentPresenter Content="{Binding Trash}" ContentTemplate="{StaticResource Stat}" />
+                        </UniformGrid>
+                        <ItemsControl ItemsSource="{Binding Notices}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate DataType="{x:Type ui:Notice}">
+                                    <Border x:Name="Bd" Margin="0,8,0,0" Padding="0" CornerRadius="7" BorderThickness="0">
+                                        <TextBlock x:Name="Tx" Text="{Binding Text}" TextWrapping="Wrap" FontSize="12" Foreground="{StaticResource TextDim}" />
+                                    </Border>
+                                    <DataTemplate.Triggers>
+                                        <DataTrigger Binding="{Binding Kind}" Value="warn">
+                                            <Setter TargetName="Bd" Property="Background" Value="{StaticResource WarnBg}" />
+                                            <Setter TargetName="Bd" Property="BorderBrush" Value="{StaticResource WarnBorder}" />
+                                            <Setter TargetName="Bd" Property="BorderThickness" Value="1" />
+                                            <Setter TargetName="Bd" Property="Padding" Value="11,8" />
+                                            <Setter TargetName="Tx" Property="Foreground" Value="{StaticResource Amber}" />
+                                        </DataTrigger>
+                                        <DataTrigger Binding="{Binding Kind}" Value="empty">
+                                            <Setter TargetName="Tx" Property="FontSize" Value="12.5" />
+                                            <Setter TargetName="Tx" Property="TextAlignment" Value="Center" />
+                                            <Setter TargetName="Bd" Property="Padding" Value="10,24" />
+                                        </DataTrigger>
+                                    </DataTemplate.Triggers>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </StackPanel>
+                    <ListBox Style="{StaticResource PlainList}" ItemsSource="{Binding Rows}" MaxHeight="190" Margin="0,13,0,0" AlternationCount="2">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate DataType="{x:Type ui:PreviewRow}">
+                                <Border x:Name="Bd" Padding="10,7" CornerRadius="6">
+                                    <DockPanel>
+                                        <TextBlock DockPanel.Dock="Right" Text="{Binding Counts}" FontSize="12" Foreground="{StaticResource TextDim}" Margin="12,0,0,0" />
+                                        <TextBlock x:Name="Tx" Text="{Binding Folder}" FontSize="12.5" TextTrimming="CharacterEllipsis" />
+                                    </DockPanel>
+                                </Border>
+                                <DataTemplate.Triggers>
+                                    <DataTrigger Binding="{Binding RelativeSource={RelativeSource AncestorType=ListBoxItem}, Path=(ItemsControl.AlternationIndex)}" Value="0">
+                                        <Setter TargetName="Bd" Property="Background" Value="#0AFFFFFF" />
+                                    </DataTrigger>
+                                    <DataTrigger Binding="{Binding IsHead}" Value="True">
+                                        <Setter TargetName="Tx" Property="Foreground" Value="{StaticResource TextDim}" />
+                                        <Setter TargetName="Tx" Property="FontSize" Value="12" />
+                                    </DataTrigger>
+                                    <DataTrigger Binding="{Binding IsMore}" Value="True">
+                                        <Setter TargetName="Tx" Property="Foreground" Value="{StaticResource TextFaint}" />
+                                        <Setter TargetName="Tx" Property="FontStyle" Value="Italic" />
+                                        <Setter TargetName="Tx" Property="FontSize" Value="12" />
+                                    </DataTrigger>
+                                </DataTemplate.Triggers>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </DockPanel>
+            </Border>
+        </Grid>
+
+        <!-- Слой истории -->
+        <Grid Background="#8C0C0F14" DataContext="{Binding History}" Visibility="{Binding IsOpen, Converter={StaticResource BoolVis}}">
+            <Border Style="{StaticResource Glass}" Background="#F2242A33" Width="640" MaxHeight="504" Padding="20" VerticalAlignment="Center" HorizontalAlignment="Center">
+                <DockPanel>
+                    <DockPanel DockPanel.Dock="Top" Margin="0,0,0,13">
+                        <Button DockPanel.Dock="Right" Style="{StaticResource GhostButton}" Content="Очистить" Click="HistoryClear_Click" />
+                        <TextBlock Text="История синхронизаций" FontSize="15" FontWeight="SemiBold" VerticalAlignment="Center" />
+                    </DockPanel>
+                    <Button DockPanel.Dock="Bottom" Style="{StaticResource GlassButton}" Content="Закрыть" HorizontalAlignment="Right" Margin="0,13,0,0" Click="HistoryClose_Click" />
+                    <Grid>
+                        <TextBlock Text="{Binding EmptyText}" Foreground="{StaticResource TextDim}" FontSize="12.5" HorizontalAlignment="Center" Margin="0,24"
+                                   Visibility="{Binding EmptyText, Converter={StaticResource NullVis}}" />
+                        <ListBox Style="{StaticResource PlainList}" ItemsSource="{Binding Runs}" ScrollViewer.CanContentScroll="False">
+                            <ListBox.ItemTemplate>
+                                <DataTemplate DataType="{x:Type ui:HistoryRunRow}">
+                                    <Border BorderBrush="#14FFFFFF" BorderThickness="1" CornerRadius="7" Margin="0,0,0,6" ClipToBounds="True">
+                                        <StackPanel>
+                                            <Border Padding="11,9" Background="#08FFFFFF" Cursor="Hand" MouseLeftButtonUp="HistoryRun_Click">
+                                                <DockPanel>
+                                                    <TextBlock DockPanel.Dock="Left" Text="{Binding Caret}" Width="12" FontSize="10" Foreground="{StaticResource TextDim}" VerticalAlignment="Center" />
+                                                    <TextBlock DockPanel.Dock="Left" Text="{Binding Time}" FontSize="12.5" Margin="10,0,0,0" />
+                                                    <TextBlock DockPanel.Dock="Left" Text="{Binding Dir}" FontSize="12.5" Foreground="{StaticResource TextDim}" Margin="10,0,0,0" />
+                                                    <ItemsControl DockPanel.Dock="Right" ItemsSource="{Binding Badges}" Margin="6,0,0,0">
+                                                        <ItemsControl.ItemsPanel><ItemsPanelTemplate><StackPanel Orientation="Horizontal" /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                                                        <ItemsControl.ItemTemplate>
+                                                            <DataTemplate DataType="{x:Type ui:Part}">
+                                                                <Border CornerRadius="9" Padding="7,2" Margin="4,0,0,0" Background="#26B39A63">
+                                                                    <TextBlock Style="{StaticResource PartText}" Text="{Binding Text}" FontSize="11" />
+                                                                </Border>
+                                                            </DataTemplate>
+                                                        </ItemsControl.ItemTemplate>
+                                                    </ItemsControl>
+                                                    <ItemsControl ItemsSource="{Binding Counts}" HorizontalAlignment="Right">
+                                                        <ItemsControl.ItemsPanel><ItemsPanelTemplate><StackPanel Orientation="Horizontal" /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                                                        <ItemsControl.ItemTemplate>
+                                                            <DataTemplate DataType="{x:Type ui:Part}">
+                                                                <TextBlock Style="{StaticResource PartText}" Text="{Binding Text}" FontSize="12.5" Margin="4,0,0,0" />
+                                                            </DataTemplate>
+                                                        </ItemsControl.ItemTemplate>
+                                                    </ItemsControl>
+                                                </DockPanel>
+                                            </Border>
+                                            <ItemsControl ItemsSource="{Binding Files}" Margin="33,6,11,9" MaxHeight="170"
+                                                          Visibility="{Binding IsExpanded, Converter={StaticResource BoolVis}}">
+                                                <ItemsControl.Template>
+                                                    <ControlTemplate TargetType="ItemsControl">
+                                                        <ScrollViewer VerticalScrollBarVisibility="Auto"><ItemsPresenter /></ScrollViewer>
+                                                    </ControlTemplate>
+                                                </ItemsControl.Template>
+                                                <ItemsControl.ItemTemplate>
+                                                    <DataTemplate DataType="{x:Type ui:Part}">
+                                                        <TextBlock Style="{StaticResource PartText}" Text="{Binding Text}" FontSize="12" TextTrimming="CharacterEllipsis" Margin="0,1" />
+                                                    </DataTemplate>
+                                                </ItemsControl.ItemTemplate>
+                                            </ItemsControl>
+                                        </StackPanel>
+                                    </Border>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+                    </Grid>
+                </DockPanel>
+            </Border>
+        </Grid>
+    </Grid>
+</Window>

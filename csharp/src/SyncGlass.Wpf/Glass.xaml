@@ -1,0 +1,281 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- Перенос renderer/styles.css: спокойная тёмная тема, полупрозрачные панели.
+         Размытия фона нет и в Electron-версии; тени не ставим - эффекты WPF дорогие
+         (урок Paint Pro 1.29: DropShadowEffect без кеша тормозил окно). -->
+
+    <Color x:Key="TextColor">#DFE3E8</Color>
+    <SolidColorBrush x:Key="Text" Color="#DFE3E8" />
+    <SolidColorBrush x:Key="TextDim" Color="#80DFE3E8" />
+    <SolidColorBrush x:Key="TextFaint" Color="#52DFE3E8" />
+    <SolidColorBrush x:Key="Accent" Color="#5B7FA6" />
+    <SolidColorBrush x:Key="AccentStrong" Color="#46688C" />
+    <SolidColorBrush x:Key="Danger" Color="#C07A7A" />
+    <SolidColorBrush x:Key="Ok" Color="#78A98C" />
+    <SolidColorBrush x:Key="Amber" Color="#B39A63" />
+    <SolidColorBrush x:Key="GlassBg" Color="#0DFFFFFF" />
+    <SolidColorBrush x:Key="GlassBgStrong" Color="#17FFFFFF" />
+    <SolidColorBrush x:Key="GlassBorder" Color="#1AFFFFFF" />
+    <SolidColorBrush x:Key="Sunken" Color="#40000000" />
+    <SolidColorBrush x:Key="Hover" Color="#0DFFFFFF" />
+    <SolidColorBrush x:Key="RowChecked" Color="#295B7FA6" />
+    <SolidColorBrush x:Key="RowCheckedBorder" Color="#525B7FA6" />
+    <SolidColorBrush x:Key="RowPartial" Color="#145B7FA6" />
+    <SolidColorBrush x:Key="RowPartialBorder" Color="#335B7FA6" />
+    <SolidColorBrush x:Key="WarnBg" Color="#1FB39A63" />
+    <SolidColorBrush x:Key="WarnBorder" Color="#4DB39A63" />
+
+    <!-- Стеклянная поверхность -->
+    <Style x:Key="Glass" TargetType="Border">
+        <Setter Property="Background" Value="{StaticResource GlassBg}" />
+        <Setter Property="BorderBrush" Value="{StaticResource GlassBorder}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="CornerRadius" Value="10" />
+    </Style>
+
+    <Style x:Key="Dim" TargetType="TextBlock">
+        <Setter Property="Foreground" Value="{StaticResource TextDim}" />
+        <Setter Property="FontSize" Value="11.5" />
+    </Style>
+
+    <!-- Кнопки: обычная, «призрак», главная -->
+    <Style x:Key="GlassButton" TargetType="Button">
+        <Setter Property="Foreground" Value="{StaticResource Text}" />
+        <Setter Property="Background" Value="{StaticResource GlassBg}" />
+        <Setter Property="BorderBrush" Value="{StaticResource GlassBorder}" />
+        <Setter Property="BorderThickness" Value="1" />
+        <Setter Property="Padding" Value="14,7" />
+        <Setter Property="FontSize" Value="12.5" />
+        <Setter Property="FontWeight" Value="Medium" />
+        <Setter Property="Cursor" Value="Hand" />
+        <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="Bd" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="7" Padding="{TemplateBinding Padding}">
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Bd" Property="Background" Value="{StaticResource GlassBgStrong}" />
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Opacity" Value="0.35" />
+                            <Setter Property="Cursor" Value="No" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+    <Style x:Key="GhostButton" TargetType="Button" BasedOn="{StaticResource GlassButton}">
+        <Setter Property="Background" Value="#08FFFFFF" />
+    </Style>
+    <Style x:Key="PrimaryButton" TargetType="Button" BasedOn="{StaticResource GlassButton}">
+        <Setter Property="Background" Value="{StaticResource AccentStrong}" />
+        <Setter Property="BorderBrush" Value="#24FFFFFF" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="Bd" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="7" Padding="{TemplateBinding Padding}">
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Bd" Property="Background" Value="{StaticResource Accent}" />
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Opacity" Value="0.35" />
+                            <Setter Property="Cursor" Value="No" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- Переключатель направления: два положения в утопленной рамке -->
+    <Style x:Key="DirButton" TargetType="RadioButton">
+        <Setter Property="Foreground" Value="{StaticResource TextDim}" />
+        <Setter Property="FontSize" Value="12.5" />
+        <Setter Property="FontWeight" Value="Medium" />
+        <Setter Property="Cursor" Value="Hand" />
+        <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="RadioButton">
+                    <Border x:Name="Bd" Background="Transparent" CornerRadius="5" Padding="12,5">
+                        <ContentPresenter />
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsChecked" Value="True">
+                            <Setter TargetName="Bd" Property="Background" Value="{StaticResource GlassBgStrong}" />
+                            <Setter Property="Foreground" Value="{StaticResource Text}" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- Флажок в три положения: галочка, чёрточка («частично»), пусто -->
+    <Style x:Key="GlassCheck" TargetType="CheckBox">
+        <Setter Property="Foreground" Value="{StaticResource Text}" />
+        <Setter Property="Cursor" Value="Hand" />
+        <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+        <Setter Property="VerticalAlignment" Value="Center" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="CheckBox">
+                    <StackPanel Orientation="Horizontal" Background="Transparent">
+                        <Border x:Name="Box" Width="16" Height="16" CornerRadius="4" BorderThickness="1.5"
+                                BorderBrush="{StaticResource GlassBorder}" Background="{StaticResource GlassBg}">
+                            <Grid>
+                                <Path x:Name="Tick" Data="M3.5,8 L6.5,11 L12,4.5" Stroke="White" StrokeThickness="2"
+                                      StrokeStartLineCap="Round" StrokeEndLineCap="Round" Visibility="Collapsed" />
+                                <Rectangle x:Name="Dash" Width="8" Height="2" RadiusX="1" RadiusY="1" Fill="White" Visibility="Collapsed" />
+                            </Grid>
+                        </Border>
+                        <ContentPresenter Margin="7,0,0,0" VerticalAlignment="Center" />
+                    </StackPanel>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsChecked" Value="True">
+                            <Setter TargetName="Box" Property="Background" Value="{StaticResource Accent}" />
+                            <Setter TargetName="Box" Property="BorderBrush" Value="Transparent" />
+                            <Setter TargetName="Tick" Property="Visibility" Value="Visible" />
+                        </Trigger>
+                        <Trigger Property="IsChecked" Value="{x:Null}">
+                            <Setter TargetName="Box" Property="Background" Value="{StaticResource Accent}" />
+                            <Setter TargetName="Box" Property="BorderBrush" Value="Transparent" />
+                            <Setter TargetName="Dash" Property="Visibility" Value="Visible" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- Тёмная полоса прокрутки для всех списков (у Electron так же - см. styles.css) -->
+    <Style TargetType="ScrollBar">
+        <Setter Property="Width" Value="7" />
+        <Setter Property="MinWidth" Value="7" />
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ScrollBar">
+                    <Track x:Name="PART_Track" IsDirectionReversed="True">
+                        <Track.Thumb>
+                            <Thumb>
+                                <Thumb.Template>
+                                    <ControlTemplate TargetType="Thumb">
+                                        <Border Background="#24FFFFFF" CornerRadius="4" />
+                                    </ControlTemplate>
+                                </Thumb.Template>
+                            </Thumb>
+                        </Track.Thumb>
+                    </Track>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+        <Style.Triggers>
+            <Trigger Property="Orientation" Value="Horizontal">
+                <Setter Property="Visibility" Value="Collapsed" />
+            </Trigger>
+        </Style.Triggers>
+    </Style>
+
+    <!-- Выпадающий список в статус-баре -->
+    <Style x:Key="GlassCombo" TargetType="ComboBox">
+        <Setter Property="Foreground" Value="{StaticResource Text}" />
+        <Setter Property="FontSize" Value="12" />
+        <Setter Property="Cursor" Value="Hand" />
+        <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ComboBox">
+                    <Grid>
+                        <ToggleButton IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}"
+                                      Focusable="False" ClickMode="Press">
+                            <ToggleButton.Template>
+                                <ControlTemplate TargetType="ToggleButton">
+                                    <Border Background="{StaticResource Sunken}" BorderBrush="{StaticResource GlassBorder}" BorderThickness="1" CornerRadius="7" />
+                                </ControlTemplate>
+                            </ToggleButton.Template>
+                        </ToggleButton>
+                        <StackPanel Orientation="Horizontal" IsHitTestVisible="False" Margin="8,4">
+                            <ContentPresenter Content="{TemplateBinding SelectionBoxItem}" ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}" />
+                            <TextBlock Text="⌄" Margin="7,-4,0,0" FontSize="12" Foreground="{StaticResource TextDim}" />
+                        </StackPanel>
+                        <Popup IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True" Focusable="False">
+                            <Border Background="#21262E" BorderBrush="{StaticResource GlassBorder}" BorderThickness="1" CornerRadius="7"
+                                    MinWidth="{Binding ActualWidth, RelativeSource={RelativeSource TemplatedParent}}" Padding="3">
+                                <ItemsPresenter />
+                            </Border>
+                        </Popup>
+                    </Grid>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+    <Style TargetType="ComboBoxItem">
+        <Setter Property="Foreground" Value="{StaticResource Text}" />
+        <Setter Property="Padding" Value="8,4" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ComboBoxItem">
+                    <Border x:Name="Bd" Padding="{TemplateBinding Padding}" CornerRadius="5" Background="Transparent">
+                        <ContentPresenter />
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsHighlighted" Value="True">
+                            <Setter TargetName="Bd" Property="Background" Value="{StaticResource GlassBgStrong}" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- Поле пути: утопленное, только для чтения -->
+    <Style x:Key="PathBox" TargetType="TextBox">
+        <Setter Property="IsReadOnly" Value="True" />
+        <Setter Property="Foreground" Value="{StaticResource Text}" />
+        <Setter Property="FontSize" Value="12" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="TextBox">
+                    <Border Background="#47000000" BorderBrush="{StaticResource GlassBorder}" BorderThickness="1" CornerRadius="7" Padding="10,7">
+                        <ScrollViewer x:Name="PART_ContentHost" VerticalAlignment="Center" />
+                    </Border>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- Строки списков без системной подсветки выбора -->
+    <Style x:Key="PlainItem" TargetType="ListBoxItem">
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+        <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ListBoxItem">
+                    <ContentPresenter />
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+    <Style x:Key="PlainList" TargetType="ListBox">
+        <Setter Property="Background" Value="Transparent" />
+        <Setter Property="BorderThickness" Value="0" />
+        <Setter Property="Padding" Value="0" />
+        <Setter Property="ItemContainerStyle" Value="{StaticResource PlainItem}" />
+        <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Disabled" />
+        <Setter Property="VirtualizingPanel.IsVirtualizing" Value="True" />
+        <Setter Property="VirtualizingPanel.VirtualizationMode" Value="Recycling" />
+        <Setter Property="VirtualizingPanel.ScrollUnit" Value="Pixel" />
+    </Style>
+</ResourceDictionary>

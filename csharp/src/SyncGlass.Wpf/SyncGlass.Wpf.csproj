@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Окно SyncGlass на WPF: только разметка, стили и привязки. Логика окна - в
+       SyncGlass.Ui (перенос renderer.js), ядро - в SyncGlass.Core. -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>SyncGlass.Wpf</RootNamespace>
+    <AssemblyName>SyncGlass</AssemblyName>
+    <Product>SyncGlass</Product>
+    <Company>ALEXaloysha</Company>
+    <!-- Один номер версии на обе версии SyncGlass (C# и Electron). -->
+    <Version>1.2.0</Version>
+    <ApplicationIcon>Assets\AppIcon.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.3.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SyncGlass.Ui\SyncGlass.Ui.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Resource Include="Assets\AppIcon.ico" />
+  </ItemGroup>
+
+</Project>
