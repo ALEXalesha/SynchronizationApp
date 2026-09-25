@@ -111,6 +111,15 @@ public class WindowStateTests
         Assert.Equal("{\"x\":510,\"y\":240,\"width\":900,\"height\":600,\"maximized\":false}", File.ReadAllText(file));
     }
 
+    // Нового в C# (ответы сверены с JS): экран ниже окна - прижимается верхом, заголовок
+    // важнее низа; окно, заехавшее выше экрана, опускается к его верху.
+    [Fact]
+    public void окно_выше_экрана_прижимается_верхом_а_не_низом()
+    {
+        Assert.Equal(new Placement(0, 0, 900, 600, false), Restore(new Saved(10, 20, 900, 600, false), [new Area(0, 0, 640, 481)], Opts));
+        Assert.Equal(new Placement(100, 0, 900, 600, false), Restore(new Saved(100, -15, 900, 600, false), [FullHd], Opts));
+    }
+
     // Math.round из JS: -0.5 → -0, 2.5 → 3 (а не 2, как у Math.Round по умолчанию).
     [Fact]
     public void округление_как_в_JS()
