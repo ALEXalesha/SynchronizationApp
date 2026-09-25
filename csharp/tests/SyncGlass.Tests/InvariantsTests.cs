@@ -8,9 +8,9 @@ namespace SyncGlass.Tests;
 // Генератор тот же, что в JS, до бита: деревья в C# и в JS получаются одинаковые,
 // и упавший прогон можно повторить в обеих версиях.
 //
-// Здесь десять законов из тринадцати. Три («что отмечено на экране…», «раскладка
-// индекса по веткам…» с ветками от кликов и «имя с диска не становится разметкой»)
-// держатся за клики по дереву и разметку - они переезжают вместе с окном.
+// Здесь все тринадцать законов. Два с кликами по дереву («что отмечено на экране…»,
+// «раскладка индекса по веткам…») кликают через ту же модель выбора, что и окно
+// (MainViewModel); «имя с диска не становится разметкой» - в ViewModelTests: в WPF разметки нет.
 public class InvariantsTests
 {
     // ---- Генератор (как в JS: seed = (seed * 1103515245 + 12345) & 0x7fffffff) ----
@@ -803,6 +803,123 @@ public class InvariantsTests
                 }
                 Assert.True(умолчали.Count == 0, $"прогон {i}: файл изменился, а в истории о нём ни слова: {string.Join("; ", умолчали)}");
             }
+        }
+    }
+
+    // ---- Законы с кликами по дереву (через ту же модель выбора, что у окна) ----
+
+    // Ветки и исключения, какими их порождает интерфейс: последствие кликов, а не
+    // случайный список путей. Только так рождается «выбрано, внутри снято, ещё глубже
+    // снова выбрано» - единственный способ получить две вложенные ветки разом.
+    private static (Ui.MainViewModel Ui, List<string> Folders, List<string> Excludes) КликамиПоДереву(Rnd r, List<string> узлы)
+    {
+        var ui = new Ui.MainViewModel(new FakeApi());
+        var верх = узлы.Where(p => !p.Contains('/')).ToList();
+        List<string> Внутри(bool? include)
+        {
+            var отмеченные = ui.Marks.Values.Where(m => include == null || m.Include == include).Select(m => Paths.CiKey(m.Path) + "/").ToList();
+            return узлы.Where(p => отмеченные.Any(m => Paths.CiKey(p).StartsWith(m, StringComparison.Ordinal))).ToList();
+        }
+        ui.ToggleCheck(r.Pick(верх.Count > 0 ? верх : узлы));
+        for (var k = 0; k < 14; k++)
+        {
+            var бросок = r.Next();
+            // Отдельно целимся внутрь уже снятого: «исключено, а внутри снова включено».
+            var глубже = бросок < 0.4 ? Внутри(false) : бросок < 0.75 ? Внутри(null) : new List<string>();
+            ui.ToggleCheck(r.Pick(глубже.Count > 0 ? глубже : узлы));
+        }
+        // Проход по одной цепочке сверху вниз: чередование «включено / исключено / снова
+        // включено» гарантированно, а не по счастливой случайности.
+        var цепочка = r.Pick(узлы).Split('/');
+        for (var d = 1; d <= цепочка.Length; d++) ui.ToggleCheck(string.Join('/', цепочка, 0, d));
+        var (folders, excludes) = ui.CollectSelection();
+        return (ui, folders, excludes);
+    }
+
+    private static List<string> Узлы(Sides s) => AllPaths(s.Src).Concat(AllPaths(s.Dst)).Distinct(StringComparer.Ordinal).ToList();
+
+    // Тринадцатый закон: раскладка индекса по веткам (подъём по пути) отдаёт ветке то же,
+    // что поветочный перебор, - на ветках от кликов, с вложенными парами.
+    [Fact]
+    public async Task раскладка_индекса_по_веткам_совпадает_с_поветочным_разбором()
+    {
+        static string Shape(ScanResult s) => string.Join("|",
+            string.Join(",", s.Files.Select(e => $"{Paths.CiKey(e.Path)}:{e.Size}").OrderBy(x => x, StringComparer.Ordinal)),
+            string.Join(",", s.Dirs.Select(Paths.CiKey).OrderBy(x => x, StringComparer.Ordinal)),
+            string.Join(",", s.Skipped.Select(Paths.CiKey).OrderBy(x => x, StringComparer.Ordinal)));
+        var вложенных = 0;
+        var всего = 0;
+        for (var i = 1; i <= 30; i++)
+        {
+            var r = new Rnd(i * 7919 + 1013);
+            using var s = new Sides();
+            MakeDenseTree(r, s.Src);
+            PerturbedCopy(r, s.Src, s.Dst);
+            var узлы = Узлы(s);
+            if (узлы.Count == 0) continue;
+
+            var (_, folders, excludes) = КликамиПоДереву(r, узлы);
+            if (folders.Count == 0) continue;
+            всего++;
+            if (folders.Any(a => folders.Any(b => a != b && Paths.CiKey(a).StartsWith(Paths.CiKey(b) + "/", StringComparison.Ordinal)))) вложенных++;
+
+            foreach (var root in new[] { s.Src, s.Dst })
+            {
+                var idx = await IndexOfSide(root);
+                var groups = Plan.GroupIndexByBranch(idx, folders, excludes);
+                foreach (var folder in folders)
+                {
+                    var перебором = Plan.ScanFromIndex(idx, folder, excludes);
+                    var раскладкой = groups.GetValueOrDefault(Paths.CiKey(folder)) ?? ScanResult.Empty();
+                    Assert.True(Shape(раскладкой) == Shape(перебором), $"прогон {i}: ветка {folder} разошлась (исключения: {string.Join(",", excludes)})");
+                }
+            }
+        }
+        Assert.True(вложенных >= 5, $"вложенных пар веток всего {вложенных} из {всего} прогонов - генератор до случая не доходит");
+    }
+
+    // Восьмой закон: что показывает строка на экране (IsIncluded) - то и происходит
+    // с файлом на диске, и ничего сверх того.
+    [Fact]
+    public async Task что_отмечено_на_экране_то_и_синхронизируется_и_ничего_сверх_того()
+    {
+        for (var i = 1; i <= 30; i++)
+        {
+            var r = new Rnd(i * 7919 + 313);
+            using var s = new Sides();
+            MakeDenseTree(r, s.Src);
+            PerturbedCopy(r, s.Src, s.Dst);
+            var узлы = Узлы(s);
+            if (узлы.Count == 0) continue;
+
+            var (ui, folders, excludes) = КликамиПоДереву(r, узлы);
+            if (folders.Count == 0) continue;
+
+            var доПрогона = Snap(s.Dst);
+            var наИсточнике = Snap(s.Src);
+            var plan = await Plan.BuildRunPlan(s.Src, s.Dst, folders, excludes, Scanner);
+            var res = await FsOps.ApplyPlan(s.Src, s.Dst, plan, RmTrash);
+            Assert.True(res.Failures.Count == 0, $"прогон {i}: ошибки на ровном месте: {string.Join(", ", res.Failures)}");
+            var после = Snap(s.Dst);
+
+            var нарушения = new List<string>();
+            foreach (var (ключ, было) in наИсточнике)
+            {
+                if (было == "/") continue;
+                var отмечен = ui.IsIncluded(ключ);
+                после.TryGetValue(ключ, out var стало);
+                доПрогона.TryGetValue(ключ, out var раньше);
+                if (отмечен && стало != было) нарушения.Add($"{ключ}: отмечен на экране, но на приёмнике {стало}");
+                if (!отмечен && стало != раньше) нарушения.Add($"{ключ}: не отмечен, а на приёмнике поменялся");
+            }
+            foreach (var (ключ, было) in доПрогона)
+            {
+                if (было == "/" || наИсточнике.ContainsKey(ключ)) continue;
+                if (ui.IsIncluded(ключ)) continue; // отмечен и лишний - законно удалён
+                после.TryGetValue(ключ, out var стало);
+                if (стало != было) нарушения.Add($"{ключ}: не отмечен, а с приёмника пропал");
+            }
+            Assert.True(нарушения.Count == 0, $"прогон {i}: экран и диск разошлись (ветки: {string.Join(",", folders)}; исключения: {string.Join(",", excludes)}): {string.Join("; ", нарушения)}");
         }
     }
 
