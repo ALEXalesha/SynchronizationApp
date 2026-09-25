@@ -885,9 +885,30 @@ test('при падающих файловых операциях ни один 
   const restore = () => Object.assign(fsp, real);
   t.after(restore);
 
+  let перезаписей = 0;
   for (let i = 1; i <= 60; i += 1) {
     setSeed(i * 7919 + 101);
-    const { src, dst, folders } = await build(t);
+    // Каждый второй прогон приёмник - искажённая копия источника. На двух независимых
+    // деревьях перезаписей почти нет, и возврат оригинала после сорвавшейся перезаписи
+    // закон не проверял вовсе: мутации «не возвращать оригинал» и «выбросить служебную
+    // папку вместе с застрявшим» проходили зелёными (найдено 26.09.2026 при переносе
+    // на C#, где закон тот же).
+    let src;
+    let dst;
+    let folders;
+    if (i % 2 === 0) {
+      const base = await fsp.mkdtemp(path.join(os.tmpdir(), 'syncglass-inv-'));
+      t.after(() => fsp.rm(base, { recursive: true, force: true }).catch(() => {}));
+      src = path.join(base, 'src');
+      dst = path.join(base, 'dst');
+      await fsp.mkdir(src);
+      await fsp.mkdir(dst);
+      await makeDenseTree(src);
+      await perturbedCopy(src, dst);
+      folders = await верхниеВетки(src, dst);
+    } else {
+      ({ src, dst, folders } = await build(t));
+    }
     if (!folders.length) continue;
 
     const before = await snap(dst);
@@ -898,6 +919,7 @@ test('при падающих файловых операциях ни один 
       moveFrom: new Set(plan.moves.map((m) => m.from.toLowerCase())),
       conflicts: plan.conflicts.map((c) => c.toLowerCase()),
     };
+    перезаписей += plan.overwrite.length;
 
     fsp.rename = async (...a) => { if (rnd() < 0.2) throw boom('rename'); return real.rename(...a); };
     fsp.copyFile = async (...a) => { if (rnd() < 0.2) throw boom('copyFile'); return real.copyFile(...a); };
@@ -922,6 +944,7 @@ test('при падающих файловых операциях ни один 
     }
     assert.deepStrictEqual(lost, [], `прогон ${i}: файл пропал при отказах`);
   }
+  assert.ok(перезаписей >= 20, `перезаписей всего ${перезаписей} - возврат оригинала закон не проверяет`);
 });
 
 // Девятый закон. «Предпросмотр не врёт» есть, а «история не врёт» не было:

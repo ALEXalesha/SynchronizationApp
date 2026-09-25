@@ -21,6 +21,7 @@ public static partial class FsOps
     internal static void Mkdir(string dir)
     {
         MkdirObserver.Value?.Invoke(dir);
+        MaybeFail("mkdir");
         Directory.CreateDirectory(dir);
     }
 
@@ -74,6 +75,7 @@ public static partial class FsOps
         await (ensure ?? EnsureDir)(Path.GetDirectoryName(dst)!);
         try
         {
+            MaybeFail("copyFile");
             File.Copy(src, dst, overwrite: true);
         }
         catch (Exception e) when (IsGone(e) && !File.Exists(src))

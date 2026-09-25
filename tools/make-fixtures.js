@@ -36,6 +36,17 @@ fs.writeFileSync(
   JSON.stringify(samples.map((s) => ({ s, key: ciKey(s) })), null, 2) + '\n'
 );
 
+// Генератор законов (test/invariants.test.js) - первые числа при засеве 7919:
+// C# повторяет его до бита, чтобы случайные деревья в двух версиях совпадали.
+{
+  let seed = 7919;
+  const rnd = () => {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    return seed / 0x7fffffff;
+  };
+  fs.writeFileSync(path.join(out, 'rnd.json'), JSON.stringify([rnd(), rnd(), rnd(), rnd(), rnd()]) + '\n');
+}
+
 (async () => {
   const { call, userData } = await loadMain();
 

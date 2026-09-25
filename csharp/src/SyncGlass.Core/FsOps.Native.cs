@@ -58,8 +58,19 @@ public static partial class FsOps
     // с REPLACE_EXISTING, и откат со служебной папкой держится на этих правилах:
     // файл поверх файла - замена, папка поверх файла - замена, что угодно поверх
     // папки - отказ. File.Move/Directory.Move ведут себя иначе, поэтому напрямую.
+    // Подмена для законов: по имени операции ('rename', 'copyFile', 'mkdir') - отказ,
+    // которым она ответит (null - выполнить как обычно). Так в JS-законе подменялись
+    // fsp.rename/copyFile/mkdir: защиту от потери данных проверить можно только отказами.
+    internal static readonly AsyncLocal<Func<string, Exception?>?> WriteFault = new();
+
+    internal static void MaybeFail(string op)
+    {
+        if (WriteFault.Value?.Invoke(op) is { } fault) throw fault;
+    }
+
     public static void Rename(string from, string to)
     {
+        MaybeFail("rename");
         if (!MoveFileEx(Long(from), Long(to), MOVEFILE_REPLACE_EXISTING))
         {
             var err = Marshal.GetLastWin32Error();
