@@ -1,0 +1,7 @@
+{
+  "localPath": "C:\\Users\\Пример\\Документы",
+  "networkPath": "\\\\Сервер\\Общая папка",
+  "direction": "toLocal",
+  "sort": "date",
+  "sizeMode": "capped"
+}
