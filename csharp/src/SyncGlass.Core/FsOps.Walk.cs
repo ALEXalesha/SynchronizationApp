@@ -44,6 +44,10 @@ internal interface IWalk
 
 public static partial class FsOps
 {
+    // Подмена для тестов: по пути папки - исключение, которым ответит её чтение (null -
+    // читать как обычно). AsyncLocal, как StatOverride.
+    internal static readonly AsyncLocal<Func<string, Exception?>?> ReadDirFault = new();
+
     // Держим всё, включая скрытые и системные: Node их видит, и план обязан их видеть.
     private static readonly EnumerationOptions ListAll = new()
     {
@@ -61,6 +65,8 @@ public static partial class FsOps
     // скопировать - будет ошибкой в отчёте. Ссылки и точки соединения - IsSymlink.
     internal static List<Dirent> ReadDir(string dir)
     {
+        // Сбой чтения, подставленный тестом (гонки и обрывы не воспроизводятся иначе).
+        if (ReadDirFault.Value?.Invoke(dir) is { } fault) throw fault;
         var outList = new List<Dirent>();
         foreach (var fi in new DirectoryInfo(dir).EnumerateFileSystemInfos("*", ListAll))
         {
