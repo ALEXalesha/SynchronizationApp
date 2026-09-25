@@ -4,6 +4,7 @@
 # её правила - имена без учёта регистра, права через настоящий icacls
 # (denied.test.js). Электрон тестам не нужен: main.js и renderer.js
 # поднимаются с заглушками, поэтому его бинарник не скачивается вовсе.
+# C#-версия (csharp/) проверяется тут же: те же законы, перенесённые в xUnit.
 name: CI
 
 on:
@@ -33,3 +34,10 @@ jobs:
 
       - name: Тесты, законы и законы масштаба
         run: npm test
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: C#-версия, тесты и законы
+        run: dotnet test csharp/SyncGlass.sln
