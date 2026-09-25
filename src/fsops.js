@@ -16,23 +16,105 @@ const SCAN_CONCURRENCY = 32;
 const STAGE_DIR = '.sgundo';
 
 // Ограничитель параллельности: не больше max одновременных операций.
-function createLimiter(max) {
+// Обход дерева фиксированным числом работников (walkTree). Работник берёт со стека
+// одну запись - «прочитать папку» или «узнать размер файла», - делает одно обращение к
+// диску и кладёт на стек то, что нашёл. Запись - путь и ссылка на папку, промиса на
+// каждый файл нет.
+//
+// Раньше обход ставил задачу на каждый найденный файл сразу, как только прочитан
+// список папки: промис, замыкания и запись в очереди ограничителя на 32 обращения.
+// Одновременно к диску шло не больше 32, но ждали очереди все остальные: снимок кучи
+// посреди обхода настоящей папки - 129 тысяч промисов и 360 тысяч замыканий, куча 460
+// МБ при 115 МБ живых данных, процесс 700 МБ. Долгоживущие временные объекты уходили в
+// старое поколение, где их убирают только редкие полные сборки; а очередь разбиралась
+// shift(), который на массиве в сотни тысяч элементов ещё и медленный. Закон этого -
+// test/memory.test.js.
+//
+// Папка отчитывается (dirDone) после всего своего содержимого: у каждой папки счётчик
+// незаконченного - её собственное чтение плюс по единице на каждого ребёнка. Первая
+// ошибка останавливает работников: новые записи со стека никто не берёт, начатые
+// доделываются, и обход отказывает этой ошибкой.
+//
+// h.readDir(rel) -> dirents | null   (null - папку пропустить: её нет или закрыта)
+// h.child(node, dirent, childRel) -> 'dir' | 'file' | null
+// h.file(node, childRel)             async: узнать и учесть файл
+// h.dirDone(node)                    async: папка вся пройдена
+async function walkTree(rootRel, h, concurrency = SCAN_CONCURRENCY) {
+  const rootNode = { rel: rootRel, parent: null, pending: 1, size: 0, count: 0 };
+  const stack = [{ dir: rootNode }];
+  const idle = [];
   let active = 0;
-  const queue = [];
-  const pump = () => {
-    while (active < max && queue.length) {
-      const { fn, resolve, reject } = queue.shift();
-      active += 1;
-      fn().then(resolve, reject).finally(() => {
-        active -= 1;
-        pump();
-      });
+  let failure = null;
+  let done = false;
+
+  const wakeAll = () => { while (idle.length) idle.pop()(); };
+
+  async function finish(node) {
+    // Папка закончена - отчитаться и подняться к родителю, пока родитель тоже не ждёт
+    // больше ничего.
+    for (let n = node; n; n = n.parent) {
+      n.pending -= 1;
+      if (n.pending > 0) return;
+      await h.dirDone(n);
+      if (n.parent) {
+        n.parent.size += n.size;
+        n.parent.count += n.count;
+      }
     }
-  };
-  return (fn) => new Promise((resolve, reject) => {
-    queue.push({ fn, resolve, reject });
-    pump();
-  });
+  }
+
+  async function take(item) {
+    if (item.dir) {
+      const node = item.dir;
+      const dirents = await h.readDir(node.rel);
+      if (dirents) {
+        for (const d of dirents) {
+          const childRel = node.rel ? `${node.rel}/${d.name}` : d.name;
+          const kind = h.child(node, d, childRel);
+          if (kind === 'dir') {
+            node.pending += 1;
+            stack.push({ dir: { rel: childRel, parent: node, pending: 1, size: 0, count: 0 } });
+          } else if (kind === 'file') {
+            node.pending += 1;
+            stack.push({ file: childRel, parent: node });
+          }
+        }
+        wakeAll();
+      }
+      await finish(node);
+    } else {
+      await h.file(item.parent, item.file);
+      await finish(item.parent);
+    }
+  }
+
+  async function worker() {
+    for (;;) {
+      if (failure || done) return;
+      const item = stack.pop();
+      if (!item) {
+        if (active === 0) { done = true; wakeAll(); return; }
+        await new Promise((resolve) => idle.push(resolve));
+        continue;
+      }
+      active += 1;
+      try {
+        await take(item);
+      } catch (err) {
+        if (!failure) failure = err;
+        wakeAll();
+      } finally {
+        active -= 1;
+        if (active === 0 && stack.length === 0) wakeAll();
+      }
+    }
+  }
+
+  const workers = [];
+  for (let i = 0; i < concurrency; i += 1) workers.push(worker());
+  await Promise.all(workers);
+  if (failure) throw failure;
+  return rootNode;
 }
 
 // Коды, которыми файловая система отвечает «эту папку тебе смотреть нельзя».
@@ -82,49 +164,49 @@ async function scanFiles(dir, rel = '', out = [], excludes = null, onFile = null
   return scanInto(dir, rel, out, skip, onFile, run, dirsOut, skippedOut);
 }
 
+// run остался в подписи ради совместимости вызовов: ограничитель больше не нужен,
+// одновременность задаёт число работников walkTree.
 async function scanInto(dir, rel, out, excludes, onFile, run, dirsOut, skippedOut) {
-  const limit = run || createLimiter(SCAN_CONCURRENCY);
-  let dirents;
-  try {
-    dirents = await limit(() => fsp.readdir(path.join(dir, rel), { withFileTypes: true }));
-  } catch (err) {
-    if (err.code === 'ENOENT') return out; // папки нет — пустой список
-    if (DENIED_CODES.has(err.code) && skippedOut) {
-      skippedOut.push(rel);
-      return out;
-    }
-    throw err;
-  }
-
-  const tasks = [];
-  for (const dirent of dirents) {
-    const childRel = rel ? `${rel}/${dirent.name}` : dirent.name;
-    if (excludes && excludes.has(childRel.toLowerCase())) continue; // исключённая ветка
-    if (dirent.isSymbolicLink()) continue;
-    if (dirent.name === STAGE_DIR) continue;
-    if (dirent.isDirectory()) {
-      if (dirsOut) dirsOut.push(childRel);
-      tasks.push(scanInto(dir, childRel, out, excludes, onFile, limit, dirsOut, skippedOut));
-    } else if (dirent.isFile()) {
-      tasks.push(
-        limit(() => fsp.stat(path.join(dir, childRel))).then(
-          (stat) => {
-            out.push({ path: childRel, size: stat.size, mtimeMs: stat.mtimeMs });
-            if (onFile) onFile();
-          },
-          // Обработчик именно вторым аргументом then, а не отдельным catch: catch
-          // поймал бы и 'aborted', который бросает onFile при отмене предпросмотра,
-          // и отмена утонула бы вместе с ошибками файлов.
-          (err) => {
-            const verdict = fileStatVerdict(err, skippedOut);
-            if (verdict === 'blind') skippedOut.push(childRel);
-            else if (verdict === 'fatal') throw err;
-          }
-        )
-      );
-    }
-  }
-  await Promise.all(tasks);
+  await walkTree(rel, {
+    async readDir(r) {
+      try {
+        return await fsp.readdir(path.join(dir, r), { withFileTypes: true });
+      } catch (err) {
+        if (err.code === 'ENOENT') return null; // папки нет — пустой список
+        if (DENIED_CODES.has(err.code) && skippedOut) {
+          skippedOut.push(r);
+          return null;
+        }
+        throw err;
+      }
+    },
+    child(node, dirent, childRel) {
+      if (excludes && excludes.has(childRel.toLowerCase())) return null; // исключённая ветка
+      if (dirent.isSymbolicLink()) return null;
+      if (dirent.name === STAGE_DIR) return null;
+      if (dirent.isDirectory()) {
+        if (dirsOut) dirsOut.push(childRel);
+        return 'dir';
+      }
+      return dirent.isFile() ? 'file' : null;
+    },
+    async file(node, childRel) {
+      let stat;
+      try {
+        stat = await fsp.stat(path.join(dir, childRel));
+      } catch (err) {
+        const verdict = fileStatVerdict(err, skippedOut);
+        if (verdict === 'blind') skippedOut.push(childRel);
+        else if (verdict === 'fatal') throw err;
+        return;
+      }
+      out.push({ path: childRel, size: stat.size, mtimeMs: stat.mtimeMs });
+      // onFile бросает 'aborted' при отмене предпросмотра - и отмена обязана дойти до
+      // вызывающего, а не утонуть вместе с ошибками файлов: поэтому вне try.
+      if (onFile) onFile();
+    },
+    async dirDone() {},
+  });
   return out;
 }
 
@@ -158,16 +240,18 @@ async function listChildren(dir, withMtime = false) {
     return { items: kids.map((d) => ({ name: d.name, isDir: d.isDirectory(), mtimeMs: 0 })), ok: true };
   }
 
-  const limit = createLimiter(SCAN_CONCURRENCY);
+  // Пулом, а не промисом на каждого ребёнка сразу: в папке бывают десятки тысяч файлов
+  // (закон - test/memory.test.js).
   const items = [];
-  const tasks = kids.map((d) => {
+  await runPool(kids, SCAN_CONCURRENCY, async (d) => {
     const isDir = d.isDirectory();
-    return limit(() => fsp.stat(path.join(dir, d.name))).then(
-      (st) => items.push({ name: d.name, isDir, mtimeMs: st.mtimeMs }),
-      () => items.push({ name: d.name, isDir, mtimeMs: 0 }) // stat не удался — всё равно показываем
-    );
+    try {
+      const st = await fsp.stat(path.join(dir, d.name));
+      items.push({ name: d.name, isDir, mtimeMs: st.mtimeMs });
+    } catch {
+      items.push({ name: d.name, isDir, mtimeMs: 0 }); // stat не удался — всё равно показываем
+    }
   });
-  await Promise.all(tasks);
   return { items, ok: true };
 }
 
@@ -177,55 +261,48 @@ async function listChildren(dir, withMtime = false) {
 // skippedOut — куда складывать папки, закрытые правами: обход их не роняет,
 // но и содержимого их не знает, а по такому индексу план строить нельзя.
 // Возвращает агрегат { size, count } для переданного rel.
+// run остался в подписи ради совместимости вызовов (см. scanInto).
 async function crawlTree(root, rel, onEntry, run = null, skippedOut = null) {
-  const limit = run || createLimiter(SCAN_CONCURRENCY);
-  let dirents;
-  try {
-    dirents = await limit(() => fsp.readdir(path.join(root, rel), { withFileTypes: true }));
-  } catch (err) {
-    if (err.code === 'ENOENT') return { size: 0, count: 0 };
-    if (DENIED_CODES.has(err.code) && skippedOut) {
-      skippedOut.push(rel);
-      return { size: 0, count: 0 };
-    }
-    throw err;
-  }
-
-  let size = 0;
-  let count = 0;
-  const tasks = [];
-  for (const d of dirents) {
-    if (d.isSymbolicLink() || d.name === STAGE_DIR) continue;
-    const childRel = rel ? `${rel}/${d.name}` : d.name;
-    if (d.isDirectory()) {
-      tasks.push(
-        crawlTree(root, childRel, onEntry, limit, skippedOut).then(async (sub) => {
-          await onEntry(childRel, true, sub.size, sub.count, null);
-          size += sub.size;
-          count += sub.count;
-        })
-      );
-    } else if (d.isFile()) {
-      tasks.push(
-        limit(() => fsp.stat(path.join(root, childRel))).then(
-          async (st) => {
-            await onEntry(childRel, false, st.size, 1, st.mtimeMs);
-            size += st.size;
-            count += 1;
-          },
-          // Вторым аргументом, а не catch: onEntry бросает 'aborted' и 'toobig',
-          // и погасить обход эти броски обязаны по-прежнему.
-          (err) => {
-            const verdict = fileStatVerdict(err, skippedOut);
-            if (verdict === 'blind') skippedOut.push(childRel);
-            else if (verdict === 'fatal') throw err;
-          }
-        )
-      );
-    }
-  }
-  await Promise.all(tasks);
-  return { size, count };
+  const top = await walkTree(rel, {
+    async readDir(r) {
+      try {
+        return await fsp.readdir(path.join(root, r), { withFileTypes: true });
+      } catch (err) {
+        if (err.code === 'ENOENT') return null;
+        if (DENIED_CODES.has(err.code) && skippedOut) {
+          skippedOut.push(r);
+          return null;
+        }
+        throw err;
+      }
+    },
+    child(node, dirent) {
+      if (dirent.isSymbolicLink() || dirent.name === STAGE_DIR) return null;
+      if (dirent.isDirectory()) return 'dir';
+      return dirent.isFile() ? 'file' : null;
+    },
+    async file(node, childRel) {
+      let st;
+      try {
+        st = await fsp.stat(path.join(root, childRel));
+      } catch (err) {
+        const verdict = fileStatVerdict(err, skippedOut);
+        if (verdict === 'blind') skippedOut.push(childRel);
+        else if (verdict === 'fatal') throw err;
+        return;
+      }
+      // onEntry бросает 'aborted' и 'toobig', и погасить обход эти броски обязаны по-
+      // прежнему: поэтому вне try.
+      await onEntry(childRel, false, st.size, 1, st.mtimeMs);
+      node.size += st.size;
+      node.count += 1;
+    },
+    async dirDone(node) {
+      // Корень обхода не отчитывается: его итог - то, что возвращаем.
+      if (node.parent) await onEntry(node.rel, true, node.size, node.count, null);
+    },
+  });
+  return { size: top.size, count: top.count };
 }
 
 async function ensureDir(dir) {

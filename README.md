@@ -26,6 +26,7 @@ The local folder is on the left, the network folder on the right. Tick what to s
 - **Folder-versus-file conflicts are resolved.** If `Reports` is a folder on one side and a file on the other, the destination clears the spot first and then puts the right thing there.
 - **Names are case-insensitive**, as in Windows itself: `Docs` and `docs` are the same folder.
 - **The window opens where it was closed** (1.1.0). The saved place is checked against the monitors present now: if that monitor has been unplugged, the window opens centred on the main one, and its title bar always stays on a screen. The rule is the same module as in the author's calculators and Paint Pro, with property tests over random screen layouts.
+- **Sizes are counted without eating memory** (1.1.1). The background scan used to queue a task for every file at once: on a folder with 300,000 entries the process grew to 700 MB and the scan took 33 seconds. Now a fixed number of workers take the next folder or file from a stack: the same scan takes 5.5 seconds with a peak of 140 MB.
 - **An unreachable side blocks the run.** A missing folder reads as empty, and syncing against an empty side would delete everything on the other one.
 
 <img src="docs/screenshots/preview.png" width="860" alt="The preview: how many files to move, copy, overwrite and delete">
@@ -39,11 +40,12 @@ npm install
 npm test
 ```
 
-190 tests in thirteen files, all on `node --test` with no test dependencies. The logic lives in `src/` and is tested directly; `main.js` and `renderer.js` are loaded with Electron and the DOM stubbed, so no real Electron is needed.
+197 tests in fourteen files, all on `node --test` with no test dependencies. The logic lives in `src/` and is tested directly; `main.js` and `renderer.js` are loaded with Electron and the DOM stubbed, so no real Electron is needed.
 
 Two files are worth copying:
 
 - **`invariants.test.js` - thirteen laws over random trees.** Not "check a scenario" but "state a law and try to break it": the destination becomes an exact copy; a second run finds nothing to do; stopping at any point restores the destination exactly; the plan built from the background index equals the plan from a live scan; with randomly failing file operations no file disappears from both sides; the preview's per-branch counters add up to its header. Later laws click random nodes through the real renderer and compare what the row shows with what happens on disk, change the tree between the phases of a run, and check that a name with angle brackets never reaches the markup raw. One law guards its own generator: if too few runs reach the case it exists for, it fails itself.
+- **`memory.test.js` - the law of scan memory.** The tree grows fourfold (files in one folder, or the number of folders) and the test counts how many promises wait at the same time. A healthy scan stays flat; a scan that queues a task per file grows with the tree. Both scan paths and the dated folder listing are measured, plus two checks that the worker scan answers exactly like the old one.
 - **`scaling.test.js` - laws of scale.** One input dimension grows while the others stay fixed, and the real preview handler is timed on both paths. Healthy code stays flat (x1.2); anything that loops over exclusions inside a loop over branches grows fourfold. The same run counts repeated disk reads, which on a network share cost the most. The law was checked with three mutations, one of them a defect from an earlier review, caught without naming its location.
 
 ## Running and building
