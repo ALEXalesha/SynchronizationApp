@@ -397,6 +397,12 @@ public sealed record FolderCount(string Folder, Summary Summary);
 
 ### Task 7: `Plan`, работа с диском
 
+> **Изменение порядка (26.09):** код `Plan` написан целиком в задаче 6, но почти
+> все JS-тесты плана с диском зовут `scanFiles` (живой сканер), `applyPlan`
+> и `crawlTree`. Поэтому их перенос (`PlanDiskTests`) идёт после переноса
+> `FsOps` целиком (этап 2), а мутации `TopPaths` и `ConfirmMoves` повторяются
+> тогда же: в чистых тестах их ловить нечем.
+
 **Files:**
 - Modify: `csharp/src/SyncGlass.Core/Plan.cs`, `csharp/tests/SyncGlass.Tests/PlanTests.cs`
 
