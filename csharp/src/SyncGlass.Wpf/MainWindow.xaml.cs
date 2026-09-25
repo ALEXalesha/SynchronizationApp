@@ -81,6 +81,11 @@ public partial class MainWindow : Window
     protected override void OnSourceInitialized(EventArgs e)
     {
         base.OnSourceInitialized(e);
+        // Скругление углов Windows 11: без системного заголовка оно пропадает - просим явно.
+        // На Windows 10 вызова нет, там углы у всех окон прямые.
+        var round = 2; // DWMWCP_ROUND
+        try { DwmSetWindowAttribute(new WindowInteropHelper(this).Handle, 33 /* DWMWA_WINDOW_CORNER_PREFERENCE */, ref round, sizeof(int)); }
+        catch (EntryPointNotFoundException) { }
         if (PlacementFile == null) return;
         var p = Place.Restore(Place.Load(PlacementFile), Screens(), Size);
         if (p.X is { } x && p.Y is { } y)
@@ -142,6 +147,13 @@ public partial class MainWindow : Window
 
     [DllImport("user32.dll")]
     private static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfo info);
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
+
+    private void Minimize_Click(object sender, RoutedEventArgs e) => WindowState = System.Windows.WindowState.Minimized;
+
+    private void Close_Click(object sender, RoutedEventArgs e) => Close();
 
     // ---- События ----
 
