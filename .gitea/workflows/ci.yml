@@ -1,0 +1,41 @@
+# Проверки на домашнем Gitea. Копия .github/workflows/ci.yml, отличие одно: задачи
+# идут на раннер ПК (метка windows), а не на windows-latest / ubuntu-latest - такие метки
+# есть только у раннера ноутбука, и без него задачи висели в очереди и отменялись.
+# Раз папка .gitea/workflows есть, Gitea берёт проверки только отсюда: выпуски и Pages -
+# дело GitHub, здесь их нет. Меняя проверки, править оба файла.
+
+# Проверки на каждый пуш.
+#
+# Раннер windows: программа только под Windows, и часть проверок держится за
+# её правила - имена без учёта регистра, права через настоящий icacls
+# (denied.test.js). Электрон тестам не нужен: main.js и renderer.js
+# поднимаются с заглушками, поэтому его бинарник не скачивается вовсе.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  tests:
+    name: Проверки
+    runs-on: windows
+    timeout-minutes: 20
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Зависимости
+        run: npm ci
+
+      - name: Тесты, законы и законы масштаба
+        run: npm test
