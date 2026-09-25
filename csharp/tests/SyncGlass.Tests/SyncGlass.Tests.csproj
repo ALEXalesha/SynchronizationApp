@@ -21,6 +21,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\SyncGlass.Core\SyncGlass.Core.csproj" />
+    <ProjectReference Include="..\..\src\SyncGlass.Ui\SyncGlass.Ui.csproj" />
   </ItemGroup>
 
 </Project>
