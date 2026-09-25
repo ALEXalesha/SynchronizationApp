@@ -66,6 +66,7 @@ public static partial class FsOps
     internal static List<Dirent> ReadDir(string dir)
     {
         // Сбой чтения, подставленный тестом (гонки и обрывы не воспроизводятся иначе).
+        DiskObserver.Value?.Invoke(dir);
         if (ReadDirFault.Value?.Invoke(dir) is { } fault) throw fault;
         var outList = new List<Dirent>();
         foreach (var fi in new DirectoryInfo(dir).EnumerateFileSystemInfos("*", ListAll))
