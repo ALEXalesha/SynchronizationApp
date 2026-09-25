@@ -113,6 +113,14 @@ public class PlanTests
         Assert.Equal(1, rows[1].Summary.Dirs);
     }
 
+    // Нового в C#: верхние узлы - без повторов и без вложенных, в любом порядке входа
+    // и без учёта регистра; первое написание остаётся. (Сверено с JS: ["a","x"].)
+    [Fact]
+    public void topPaths_оставляет_верхние_узлы_в_любом_порядке()
+    {
+        Assert.Equal(["a", "x"], Plan.TopPaths(["a/b/c", "a", "x", "A", "x/y"]));
+    }
+
     // ---- Законы масштаба: произведения двух законных пределов ----
 
     // «Выбрать все» на папке с тысячами узлов верхнего уровня - законный сценарий.
@@ -264,10 +272,14 @@ public class PlanTests
         var разом = 0;
         FsOps.StatOverride.Value = async _ =>
         {
-            Interlocked.Increment(ref вызовов);
+            var n = Interlocked.Increment(ref вызовов);
             var now = Interlocked.Increment(ref вВоздухе);
             lock (folders) if (now > разом) разом = now;
-            await Task.Yield();
+            // Первые обращения по-настоящему ждут: под нагрузкой соседних тестов пул
+            // потоков не успевает набрать пачку из мгновенных. Пачка обязана накопиться,
+            // пока первые ждут, - а очередь по одному её не накопит никогда.
+            if (n <= 100) await Task.Delay(1);
+            else await Task.Yield();
             Interlocked.Decrement(ref вВоздухе);
             return FileAttributes.Directory;
         };
