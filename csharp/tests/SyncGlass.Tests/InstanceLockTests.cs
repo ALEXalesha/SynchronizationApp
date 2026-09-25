@@ -82,6 +82,19 @@ public class InstanceLockTests
         }
     }
 
+    // Имя канала обе версии строят из имени пользователя: Electron - os.userInfo().username,
+    // C# - Environment.UserName. Разойдись они - каналы разные, и замок не общий.
+    [Fact]
+    public async Task имя_канала_у_Node_и_CSharp_одно()
+    {
+        using var t = new TempDir();
+        t.Write("user.js", "console.log(require('os').userInfo().username);");
+        using var node = StartNode(t.P("user.js"));
+        var user = (await node.StandardOutput.ReadLineAsync())?.Trim();
+        await node.WaitForExitAsync();
+        Assert.Equal(InstanceLock.PipeName(), "SyncGlass-" + user);
+    }
+
     [Fact]
     public async Task замок_CSharp_отказывает_Node()
     {

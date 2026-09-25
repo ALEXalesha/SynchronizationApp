@@ -67,6 +67,9 @@ async function loadMain(opts = {}) {
     exports: electronStub(userData, handlers, trashed, appEvents, windows),
   };
 
+  // Свой общий замок на каждый подъём main.js: иначе второй подъём в том же процессе
+  // (и живой SyncGlass у пользователя) заняли бы канал, и окно не открылось бы.
+  process.env.SYNCGLASS_PIPE = opts.pipe || `SyncGlass-test-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const mainPath = require.resolve(path.join(APP_ROOT, 'main.js'));
   delete require.cache[mainPath];
   require(mainPath);
@@ -82,8 +85,11 @@ async function loadMain(opts = {}) {
     if (!fn) throw new Error(`нет обработчика события: ${event}`);
     return fn();
   };
-  // Дать отработать whenReady().then(createWindow).
-  await new Promise((r) => setImmediate(r));
+  // Дать отработать whenReady().then(createWindow): общий замок занимается асинхронно,
+  // поэтому ждём само окно, а не один оборот цикла.
+  // Предел по часам, а не по числу оборотов: таймер Windows крупнее 5 мс.
+  const until = Date.now() + 1500;
+  while (windows.length === 0 && Date.now() < until) await new Promise((r) => setTimeout(r, 5));
   return { call, fireApp, sent, trashed, userData, windows };
 }
 

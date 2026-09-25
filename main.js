@@ -6,6 +6,8 @@ const fs = require('fs');
 const fsp = require('fs').promises;
 
 const crypto = require('crypto');
+const net = require('net');
+const os = require('os');
 const { summarize } = require('./src/sync');
 const { scanFiles, listChildren, crawlTree, applyPlan, restoreStage } = require('./src/fsops');
 const {
@@ -394,16 +396,54 @@ function createWindow() {
 // и кеши в userData: restoreStage второго запуска на старте вернёт «брошенные»
 // оригиналы прямо из-под первого, который в этот момент ими и занят. Вместо
 // нового окна поднимаем уже открытое.
+//
+// С 1.2.0 рядом живёт C#-версия с теми же файлами и той же служебной папкой, а замок
+// Электрона она не видит. Общий замок - именованный канал: занять его может только
+// один процесс, освобождается он сам при смерти процесса. Вторая копия (любой из двух
+// версий) шлёт в канал «show», и окно первой выходит вперёд.
+function showMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.focus();
+}
+
+// Имя канала - как у C# (InstanceLock.PipeName). Тесты подменяют его через переменную
+// окружения, чтобы не задеть живой SyncGlass, открытый у пользователя.
+const sharedPipe = () =>
+  `\\\\.\\pipe\\${process.env.SYNCGLASS_PIPE || `SyncGlass-${os.userInfo().username}`}`;
+
+// Занять общий замок. null - его держит другая копия (ей отправлено «show»).
+function acquireSharedLock() {
+  return new Promise((resolve) => {
+    const server = net.createServer((socket) => {
+      socket.on('data', (d) => {
+        if (String(d).includes('show')) showMainWindow();
+      });
+      socket.on('error', () => {});
+    });
+    server.on('error', () => {
+      const client = net.connect(sharedPipe(), () => client.end('show'));
+      client.on('error', () => {});
+      resolve(null);
+    });
+    // unref: канал не держит процесс живым сам по себе - приложение держит окно,
+    // а тесты main.js без этого не завершались бы.
+    server.listen(sharedPipe(), () => resolve(server.unref()));
+  });
+}
+
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
-  app.on('second-instance', () => {
-    if (!mainWindow || mainWindow.isDestroyed()) return;
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.focus();
-  });
+  app.on('second-instance', showMainWindow);
 
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
+    // Держим ссылку до конца работы: сборщик мусора не должен закрыть канал.
+    app.sharedLock = await acquireSharedLock();
+    if (!app.sharedLock) {
+      app.quit();
+      return;
+    }
     cleanupTempFiles();
     createWindow();
     app.on('activate', () => {
