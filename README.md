@@ -102,6 +102,10 @@ Electron · vanilla JavaScript · `node --test` · electron-builder
 
 C# 12 · .NET 8 · WPF · CommunityToolkit.Mvvm · xUnit · Inno Setup
 
+## Changelog
+
+What changed in each release: [CHANGELOG.md](CHANGELOG.md).
+
 ## Licence
 
 MIT, see [LICENSE](LICENSE).
