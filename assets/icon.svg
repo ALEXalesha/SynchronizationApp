@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+<defs>
+  <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#7196C0"/><stop offset="1" stop-color="#34506F"/>
+  </linearGradient>
+  <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#fff" stop-opacity="0.30"/><stop offset="1" stop-color="#fff" stop-opacity="0"/>
+  </linearGradient>
+  <linearGradient id="disc" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#fff" stop-opacity="0.22"/><stop offset="1" stop-color="#fff" stop-opacity="0.06"/>
+  </linearGradient>
+  <clipPath id="box"><rect width="256" height="256" rx="57.6"/></clipPath>
+</defs>
+<rect width="256" height="256" rx="57.6" fill="url(#bg)"/>
+<g clip-path="url(#box)"><ellipse cx="128" cy="5.12" rx="199.68" ry="128" fill="url(#sheen)"/></g>
+<rect x="1.536" y="1.536" width="252.928" height="252.928" rx="55.872" fill="none" stroke="rgba(255,255,255,0.22)" stroke-width="3.072"/>
+<circle cx="128" cy="128" r="94.72" fill="url(#disc)" stroke="rgba(255,255,255,0.38)" stroke-width="3.072"/>
+<path d="M66.66,105.67 A65.28,65.28 0 0 1 170.21,78.20" fill="none" stroke="#fff" stroke-width="21.76" stroke-linecap="round"/><path d="M199.06,125.93 L206.20,66.11 L148.66,92.95 Z" fill="#fff" stroke="#fff" stroke-width="5.44" stroke-linejoin="round"/>
+<path d="M189.34,150.33 A65.28,65.28 0 0 1 85.79,177.80" fill="none" stroke="#fff" stroke-width="21.76" stroke-linecap="round"/><path d="M56.94,130.07 L49.80,189.89 L107.34,163.05 Z" fill="#fff" stroke="#fff" stroke-width="5.44" stroke-linejoin="round"/>
+</svg>

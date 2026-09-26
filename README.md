@@ -33,17 +33,18 @@ The local folder is on the left, the network folder on the right. Tick what to s
 
 **Deletion is permanent, and the preview always says so.** It used to go to the Windows Recycle Bin, but the bin refuses network paths, so network deletions went direct and the two sides were told apart by the look of the path. The same share mapped as a drive letter (`Z:`) did not match that rule: the preview promised the Recycle Bin while the deletion bypassed it. A promise that depends on which of two spellings a network folder has is worse than no promise, so the Recycle Bin was removed entirely: one behaviour everywhere, one warning everywhere.
 
-## Two versions (1.2.3)
+## Two versions (1.2.4)
 
 Since 1.2.0 SyncGlass comes in two builds that do the same job and share everything:
 
 | | Electron | C# / WPF |
 |---|---|---|
 | Code | repository root: `main.js`, `renderer/`, `src/` | `csharp/` |
-| Download | `SyncGlass Setup 1.2.3.exe`, `SyncGlass-1.2.3-portable.exe` | `SyncGlass-CSharp-Setup-1.2.3.exe`, `SyncGlass-CSharp-1.2.3-portable.exe` |
-| Tests | 202 on `node --test` | 261 on xUnit |
+| Download | `SyncGlass Setup 1.2.4.exe`, `SyncGlass-1.2.4-portable.exe` | `SyncGlass-CSharp-Setup-1.2.4.exe`, `SyncGlass-CSharp-1.2.4-portable.exe` |
+| Tests | 207 on `node --test` | 261 on xUnit |
 
 - **One set of files.** Settings, history, the size cache and the window position live in `%APPDATA%\SyncGlass` in one format; the C# contract tests read files written by the Electron version itself.
+- **Their own icons.** Since 1.2.4 the Electron version has two circular arrows on accent-coloured glass (`assets/icon.*`, drawn by `npx electron tools/make-icon.js`; the same drawing is the logo in the window header). The C# version keeps its two panes with an arrow (`csharp/tools/generate-icon.ps1`), so the two are easy to tell apart on the taskbar.
 - **One running copy.** Both take the same single-instance lock (a named pipe), so the two windows can never sync the same folders at once; starting the second brings the first to the front.
 - **One version number** for both, checked by a test against `package.json`, the C# project and the C# installer.
 - **Ported law by law.** The C# version passes the same thirteen randomized laws and the laws of scale. One deliberate difference: sizes and dates come from the folder listing instead of a separate request per file, which saves a round trip per file on a network share.
@@ -57,7 +58,7 @@ npm install
 npm test
 ```
 
-202 tests in fifteen files, all on `node --test` with no test dependencies. The logic lives in `src/` and is tested directly; `main.js` and `renderer.js` are loaded with Electron and the DOM stubbed, so no real Electron is needed.
+207 tests in sixteen files, all on `node --test` with no test dependencies. The logic lives in `src/` and is tested directly; `main.js` and `renderer.js` are loaded with Electron and the DOM stubbed, so no real Electron is needed.
 
 Two files are worth copying:
 

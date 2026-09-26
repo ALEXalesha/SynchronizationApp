@@ -1,6 +1,6 @@
 {
   "name": "syncglass",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "description": "Синхронизация папок между ноутбуком и сетевым компьютером с liquid glass интерфейсом",
   "main": "main.js",
   "author": "ALEXaloysha",
@@ -27,9 +27,11 @@
       "preload.js",
       "src/**/*",
       "renderer/**/*",
+      "assets/**/*",
       "package.json"
     ],
     "win": {
+      "icon": "assets/icon.ico",
       "target": [
         {
           "target": "nsis",
@@ -47,7 +49,9 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "SyncGlass"
+      "shortcutName": "SyncGlass",
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico"
     },
     "portable": {
       "artifactName": "SyncGlass-${version}-portable.exe"

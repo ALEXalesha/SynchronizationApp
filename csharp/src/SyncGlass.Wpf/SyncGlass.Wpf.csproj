@@ -13,7 +13,7 @@
     <Product>SyncGlass</Product>
     <Company>ALEXaloysha</Company>
     <!-- Один номер версии на обе версии SyncGlass (C# и Electron). -->
-    <Version>1.2.3</Version>
+    <Version>1.2.4</Version>
     <ApplicationIcon>Assets\AppIcon.ico</ApplicationIcon>
   </PropertyGroup>
 

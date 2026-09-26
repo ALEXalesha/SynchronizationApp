@@ -367,6 +367,7 @@ function createWindow() {
     fullscreenable: false,
     backgroundColor: '#1c2128',
     title: 'SyncGlass',
+    icon: path.join(__dirname, 'assets', 'icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,

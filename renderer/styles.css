@@ -102,10 +102,10 @@ body {
   gap: 9px;
 }
 .logo {
+  /* Значок приложения (assets/icon.svg, tools/make-icon.js); скругление уже в рисунке. */
   width: 20px;
   height: 20px;
-  border-radius: 5px;
-  background: var(--accent);
+  display: block;
 }
 .brand h1 {
   font-size: 15px;

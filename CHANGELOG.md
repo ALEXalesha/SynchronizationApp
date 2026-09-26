@@ -4,6 +4,14 @@ What changed for the user in each release. The full text of each release, in Eng
 Russian, is in [docs/release-notes](docs/release-notes) (from 1.2.0) and on the
 [releases page](https://github.com/ALEXalesha/SynchronizationApp/releases).
 
+## 1.2.4 - 2026-09-26 - Electron icon
+
+- Electron: the version had no icon of its own - the taskbar, the shortcut and the
+  installer showed the Electron atom. It now has one: two circular arrows on glass in the
+  window's accent colour, simpler and bolder at 16-24 px so it stays readable on the
+  taskbar; the same drawing is the logo in the window header. The C# version keeps its
+  own icon. 261 C# tests and 207 JavaScript tests.
+
 ## 1.2.3 - 2026-09-26 - checkmark in the middle
 
 - Both versions: the checkmark sat almost a pixel right of and nearly two pixels below the
