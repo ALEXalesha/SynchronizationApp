@@ -33,15 +33,15 @@ The local folder is on the left, the network folder on the right. Tick what to s
 
 **Deletion is permanent, and the preview always says so.** It used to go to the Windows Recycle Bin, but the bin refuses network paths, so network deletions went direct and the two sides were told apart by the look of the path. The same share mapped as a drive letter (`Z:`) did not match that rule: the preview promised the Recycle Bin while the deletion bypassed it. A promise that depends on which of two spellings a network folder has is worse than no promise, so the Recycle Bin was removed entirely: one behaviour everywhere, one warning everywhere.
 
-## Two versions (1.2.1)
+## Two versions (1.2.2)
 
 Since 1.2.0 SyncGlass comes in two builds that do the same job and share everything:
 
 | | Electron | C# / WPF |
 |---|---|---|
 | Code | repository root: `main.js`, `renderer/`, `src/` | `csharp/` |
-| Download | `SyncGlass Setup 1.2.1.exe`, `SyncGlass-1.2.1-portable.exe` | `SyncGlass-CSharp-Setup-1.2.1.exe`, `SyncGlass-CSharp-1.2.1-portable.exe` |
-| Tests | 202 on `node --test` | 257 on xUnit |
+| Download | `SyncGlass Setup 1.2.2.exe`, `SyncGlass-1.2.2-portable.exe` | `SyncGlass-CSharp-Setup-1.2.2.exe`, `SyncGlass-CSharp-1.2.2-portable.exe` |
+| Tests | 202 on `node --test` | 258 on xUnit |
 
 - **One set of files.** Settings, history, the size cache and the window position live in `%APPDATA%\SyncGlass` in one format; the C# contract tests read files written by the Electron version itself.
 - **One running copy.** Both take the same single-instance lock (a named pipe), so the two windows can never sync the same folders at once; starting the second brings the first to the front.

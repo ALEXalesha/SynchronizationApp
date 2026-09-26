@@ -41,7 +41,7 @@ public class WindowTests
     private static ListItem Dto(string relPath, bool isDir = true, bool local = true, bool network = true)
         => new(relPath.Split('/')[^1], relPath, isDir, local, network, 0);
 
-    private static FakeApi DemoApi() => new()
+    internal static FakeApi DemoApi() => new()
     {
         SettingsAnswer = new AppSettings { LocalPath = @"C:\Ноутбук\Проекты", NetworkPath = @"\\ПК\Проекты", Direction = "toNetwork", Sort = "name", SizeMode = "off" },
         List = rel => rel == "Курсовая"
@@ -311,9 +311,30 @@ public class WindowTests
         return ((double)inter / Math.Max(union, 1), ax / Math.Max(an, 1) - bx / Math.Max(bn, 1), ay / Math.Max(an, 1) - by / Math.Max(bn, 1));
     }
 
+    // Кадр флажка WPF в натуральную величину (без увеличения) - для сравнения с Electron 1x.
+    private static Task<BitmapSource> RenderCheck(bool? state, int scale)
+    {
+        BitmapSource? result = null;
+        return WpfHost.Run(() =>
+        {
+            var box = new CheckBox { Style = (Style)Application.Current.FindResource("GlassCheck"), IsThreeState = true, IsChecked = state };
+            var host = new Grid { Background = new SolidColorBrush(Color.FromRgb(0x1C, 0x21, 0x28)), Width = 16, Height = 16, LayoutTransform = new ScaleTransform(scale, scale), UseLayoutRounding = true };
+            host.Children.Add(box);
+            host.Measure(new Size(16 * scale, 16 * scale));
+            host.Arrange(new Rect(0, 0, 16 * scale, 16 * scale));
+            host.UpdateLayout();
+            var bmp = new RenderTargetBitmap(16 * scale, 16 * scale, 96, 96, PixelFormats.Pbgra32);
+            bmp.Render(host);
+            bmp.Freeze();
+            result = bmp;
+            return Task.CompletedTask;
+        }).ContinueWith(_ => result!);
+    }
+
+    // Черта «частично» здесь не сравнивается: Chromium в натуральную величину ставит её на
+    // целый пиксель (7 вместо 7.5), и WPF повторяет именно это - её закон в 1x ниже.
     [Theory]
     [InlineData(true, "checked")]
-    [InlineData(null, "mixed")]
     public async Task флажок_рисуется_как_в_Electron(bool? state, string name)
     {
         bool[,]? wpf = null, wpfBox = null;
@@ -341,6 +362,90 @@ public class WindowTests
         Assert.True(boxIou > 0.97, $"квадрат флажка совпадает на {boxIou:P0}: у WPF без рамки он меньше");
         Assert.True(iou > 0.85 && Math.Abs(dx) < 1 && Math.Abs(dy) < 1,
             $"совпадение {iou:P0}, сдвиг центра ({dx:F1}; {dy:F1}) px при увеличении 4x");
+    }
+    // Закон: флажки в настоящем окне, в натуральную величину, - как у Electron 1x. Второй
+    // раз «галочки кривые» (26.09.2026): сравнение в 4x проходило, а в окне галочка сидела
+    // на пиксель правее и ниже - окно округляет разметку (UseLayoutRounding), рамка 1.5
+    // становилась 2, а галочка считалась от её внутреннего края. Сравнение - по яркости
+    // (min каналов) внутри квадрата, без скруглённых углов; эталоны в look/*-1x.png.
+    private static double[,] Lum(BitmapSource src)
+    {
+        var conv = new FormatConvertedBitmap(src, PixelFormats.Bgra32, null, 0);
+        var px = new byte[16 * 16 * 4];
+        conv.CopyPixels(new Int32Rect(0, 0, 16, 16), px, 16 * 4, 0);
+        var l = new double[16, 16];
+        for (var y = 0; y < 16; y++)
+            for (var x = 0; x < 16; x++)
+            {
+                var i = (y * 16 + x) * 4;
+                l[x, y] = Math.Min(px[i], Math.Min(px[i + 1], px[i + 2]));
+            }
+        return l;
+    }
+
+    private static double Diff(double[,] a, double[,] b)
+    {
+        double sum = 0; var n = 0;
+        for (var x = 0; x < 16; x++)
+            for (var y = 0; y < 16; y++)
+            {
+                if ((x < 3 || x > 12) && (y < 3 || y > 12)) continue; // скруглённые углы
+                sum += Math.Abs(a[x, y] - b[x, y]);
+                n++;
+            }
+        return sum / n;
+    }
+
+    private static BitmapSource Look(string name) => new PngBitmapDecoder(new Uri(Path.Combine(AppContext.BaseDirectory, "look", name)),
+        BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnLoad).Frames[0];
+
+    [Fact]
+    public async Task флажки_в_окне_в_натуральную_величину_как_в_Electron()
+    {
+        var расхождения = new List<double>();
+        await WpfHost.Run(async () =>
+        {
+            var vm = new MainViewModel(DemoApi());
+            var win = new MainWindow { PlacementFile = null, ShowActivated = false, WindowStartupLocation = WindowStartupLocation.Manual, Left = -3000, Top = 0 };
+            win.Attach(vm, null);
+            win.Show();
+            try
+            {
+                for (var i = 0; i < 100 && vm.Rows.Count < 3; i++) await Task.Delay(20);
+                vm.OnSelectAll(true);
+                win.UpdateLayout();
+                await Task.Delay(50);
+                var эталон = Lum(Look("checkbox-checked-electron-1x.png"));
+                foreach (var cb in Tree(win).OfType<CheckBox>().Where(c => c.IsVisible && c.IsChecked == true))
+                {
+                    DependencyObject? up = cb;
+                    while (up is not null and not ListBoxItem) up = VisualTreeHelper.GetParent(up);
+                    var host = (FrameworkElement)(up ?? cb);
+                    var bmp = new RenderTargetBitmap((int)Math.Ceiling(host.ActualWidth), (int)Math.Ceiling(host.ActualHeight), 96, 96, PixelFormats.Pbgra32);
+                    bmp.Render(host);
+                    var p = cb.TranslatePoint(new Point(0, 0), host);
+                    var crop = new CroppedBitmap(bmp, new Int32Rect((int)Math.Round(p.X), (int)Math.Round(p.Y), 16, 16));
+                    var alpha = new byte[16 * 16 * 4];
+                    new FormatConvertedBitmap(crop, PixelFormats.Bgra32, null, 0).CopyPixels(alpha, 16 * 4, 0);
+                    if (alpha.Where((_, i) => i % 4 == 3).All(a => a == 0)) continue; // строка вне видимой части списка не рисуется
+                    расхождения.Add(Diff(Lum(crop), эталон));
+                }
+            }
+            finally
+            {
+                win.Close();
+            }
+        });
+        Assert.True(расхождения.Count >= 2, $"флажков найдено {расхождения.Count}");
+        Assert.All(расхождения, d => Assert.True(d < 6, $"флажок отличается от Electron в среднем на {d:F1} из 255 (кривая галочка - 15+)"));
+    }
+
+    [Fact]
+    public async Task черта_флажка_в_натуральную_величину_как_в_Electron()
+    {
+        var bmp = await RenderCheck(null, 1);
+        var d = Diff(Lum(bmp), Lum(Look("checkbox-mixed-electron-1x.png")));
+        Assert.True(d < 6, $"черта отличается от Electron в среднем на {d:F1} из 255");
     }
 }
 

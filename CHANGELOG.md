@@ -4,6 +4,15 @@ What changed for the user in each release. The full text of each release, in Eng
 Russian, is in [docs/release-notes](docs/release-notes) (from 1.2.0) and on the
 [releases page](https://github.com/ALEXalesha/SynchronizationApp/releases).
 
+## 1.2.2 - 2026-09-26 - checkmarks in place
+
+- C#: the checkmark sat one pixel right of and below where Electron draws it. The window
+  rounds its layout, the 1.5 px checkbox border became 2 px, and the checkmark was placed
+  from the inner edge of that border. It is now placed from the outer edge, like the CSS
+  `::after`; a new test compares the checkboxes in a real window at actual size with
+  Electron at 1x (the 1.2.1 test compared 4x renders only, where the rounding does not
+  show). 258 C# tests and 202 JavaScript tests.
+
 ## 1.2.1 - 2026-09-26 - no more stutter; checkboxes like the original
 
 - Every refresh restarted the size scan, which re-read the 49 MB size cache from disk and
