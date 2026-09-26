@@ -12,7 +12,9 @@ namespace SyncGlass.Tests;
 // список записей при этом весит около 120 МБ.
 //
 // Меряются выделенные байты, а не пик: выделенное - верхняя граница пика и не зависит
-// от того, когда сработал сборщик. Поэтому - в коллекции без параллельных соседей.
+// от того, когда сработал сборщик. Считаются байты СВОЕГО потока (ядро чтения и записи
+// синхронное): счётчик всего процесса в CI поймал фон соседних тестов - «645 МБ на
+// чтение» при честных 20.
 //
 // ЧЕГО ЭТОТ ЗАКОН НЕ СПРАШИВАЕТ: сам индекс обхода (словарь путей в Backend) - он нужен
 // для предпросмотра и живёт, пока жив обход; его размер растёт с деревом по устройству.
@@ -26,12 +28,11 @@ public class CacheMemoryTests
                                    i * 37L, i % 5 == 0 ? null : 1, i % 3 == 0 ? null : i * 11L, i % 3 == 0 ? null : 1))
         .ToList();
 
-    private static long Выделено(Func<Task> action)
+    private static long Выделено(Action action)
     {
-        GC.Collect();
-        var before = GC.GetTotalAllocatedBytes(true);
-        action().GetAwaiter().GetResult();
-        return GC.GetTotalAllocatedBytes(true) - before;
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        action();
+        return GC.GetAllocatedBytesForCurrentThread() - before;
     }
 
     [Fact]
@@ -43,7 +44,7 @@ public class CacheMemoryTests
         var файл = new FileInfo(store.FileFor("L", "N")).Length;
 
         List<SizeEntry>? got = null;
-        var чтение = Выделено(async () => got = await store.Load("L", "N"));
+        var чтение = Выделено(() => got = store.LoadSync("L", "N"));
 
         Assert.Equal(Записей, got!.Count);
         // Сами записи: объект и строка пути - примерно полтора размера файла. Старое
@@ -57,11 +58,10 @@ public class CacheMemoryTests
         using var dir = new TempDir();
         var store = new SizeCacheStore(dir.Root);
         var записи = Записи();
-        var запись = Выделено(() => store.Save("L", "N", записи));
-        var синхронно = Выделено(() => { store.SaveSync("L", "N", записи); return Task.CompletedTask; });
+        // Save - та же SaveSync, унесённая в пул; меряем ядро.
+        var запись = Выделено(() => store.SaveSync("L", "N", записи));
         var файл = new FileInfo(store.FileFor("L", "N")).Length;
 
         Assert.True(запись <= 0.5 * файл, $"запись кеша {файл / 1048576.0:F1} МБ выделила {запись / 1048576.0:F0} МБ");
-        Assert.True(синхронно <= 0.5 * файл, $"запись при закрытии {файл / 1048576.0:F1} МБ выделила {синхронно / 1048576.0:F0} МБ");
     }
 }

@@ -230,12 +230,18 @@ public sealed class SizeCacheStore(string userData)
     // Файл читается и пишется ПОТОКОМ (закон CacheMemoryTests). Раньше кеш на 300 тысяч
     // записей (49 МБ) читался в строку и разбирался в дерево JsonNode - куча вырастала до
     // 623 МБ ради списка в 120 МБ, а окно C#-версии держало 1,3 ГБ.
-    public async Task<List<SizeEntry>?> Load(string? localPath, string? networkPath)
+    //
+    // Ядро синхронное, асинхронная обёртка лишь уносит его в пул: так закон может мерить
+    // выделенное своим потоком - счётчик всего процесса ловил и фон соседних тестов.
+    public Task<List<SizeEntry>?> Load(string? localPath, string? networkPath)
+        => Task.Run(() => LoadSync(localPath, networkPath));
+
+    public List<SizeEntry>? LoadSync(string? localPath, string? networkPath)
     {
         try
         {
-            await using var fs = new FileStream(FileFor(localPath, networkPath), FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16, useAsync: true);
-            var file = await JsonSerializer.DeserializeAsync<CacheFile>(fs, ReadOptions);
+            using var fs = new FileStream(FileFor(localPath, networkPath), FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16);
+            var file = JsonSerializer.Deserialize<CacheFile>(fs, ReadOptions);
             if (file == null) return null;
             if (Str(file.LocalPath) != localPath || Str(file.NetworkPath) != networkPath) return null;
             if (file.Entries == null) return null;
