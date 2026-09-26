@@ -33,6 +33,23 @@ The local folder is on the left, the network folder on the right. Tick what to s
 
 **Deletion is permanent, and the preview always says so.** It used to go to the Windows Recycle Bin, but the bin refuses network paths, so network deletions went direct and the two sides were told apart by the look of the path. The same share mapped as a drive letter (`Z:`) did not match that rule: the preview promised the Recycle Bin while the deletion bypassed it. A promise that depends on which of two spellings a network folder has is worse than no promise, so the Recycle Bin was removed entirely: one behaviour everywhere, one warning everywhere.
 
+## Two versions (1.2.0)
+
+Since 1.2.0 SyncGlass comes in two builds that do the same job and share everything:
+
+| | Electron | C# / WPF |
+|---|---|---|
+| Code | repository root: `main.js`, `renderer/`, `src/` | `csharp/` |
+| Download | `SyncGlass Setup 1.2.0.exe`, `SyncGlass-1.2.0-portable.exe` | `SyncGlass-CSharp-Setup-1.2.0.exe`, `SyncGlass-CSharp-1.2.0-portable.exe` |
+| Tests | 199 on `node --test` | 246 on xUnit |
+
+- **One set of files.** Settings, history, the size cache and the window position live in `%APPDATA%\SyncGlass` in one format; the C# contract tests read files written by the Electron version itself.
+- **One running copy.** Both take the same single-instance lock (a named pipe), so the two windows can never sync the same folders at once; starting the second brings the first to the front.
+- **One version number** for both, checked by a test against `package.json`, the C# project and the C# installer.
+- **Ported law by law.** The C# version passes the same thirteen randomized laws and the laws of scale. One deliberate difference: sizes and dates come from the folder listing instead of a separate request per file, which saves a round trip per file on a network share.
+
+<img src="docs/screenshots/window-csharp.png" width="860" alt="The C# version: the same two trees with its own dark title bar">
+
 ## Tests
 
 ```powershell
@@ -40,7 +57,7 @@ npm install
 npm test
 ```
 
-197 tests in fourteen files, all on `node --test` with no test dependencies. The logic lives in `src/` and is tested directly; `main.js` and `renderer.js` are loaded with Electron and the DOM stubbed, so no real Electron is needed.
+199 tests in fifteen files, all on `node --test` with no test dependencies. The logic lives in `src/` and is tested directly; `main.js` and `renderer.js` are loaded with Electron and the DOM stubbed, so no real Electron is needed.
 
 Two files are worth copying:
 
@@ -48,12 +65,22 @@ Two files are worth copying:
 - **`memory.test.js` - the law of scan memory.** The tree grows fourfold (files in one folder, or the number of folders) and the test counts how many promises wait at the same time. A healthy scan stays flat; a scan that queues a task per file grows with the tree. Both scan paths and the dated folder listing are measured, plus two checks that the worker scan answers exactly like the old one.
 - **`scaling.test.js` - laws of scale.** One input dimension grows while the others stay fixed, and the real preview handler is timed on both paths. Healthy code stays flat (x1.2); anything that loops over exclusions inside a loop over branches grows fourfold. The same run counts repeated disk reads, which on a network share cost the most. The law was checked with three mutations, one of them a defect from an earlier review, caught without naming its location.
 
+The C# tests: `dotnet test csharp/SyncGlass.sln` (.NET 8 SDK). Besides the ported laws they open the real WPF window and check that no dark text sits on the dark glass and that a tree row is laid out like the Electron one.
+
 ## Running and building
 
 ```powershell
 npm install
 npm start
 npm run dist            # installer and portable exe into dist/
+```
+
+C# version:
+
+```powershell
+dotnet run --project csharp/src/SyncGlass.Wpf
+dotnet publish csharp/src/SyncGlass.Wpf -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -o csharp/dist
+ISCC.exe csharp/installer/SyncGlass.iss   # installer into csharp/dist/
 ```
 
 The build is unsigned, so SmartScreen may warn on first launch ("More info" → "Run anyway").
@@ -64,6 +91,7 @@ The build is unsigned, so SmartScreen may warn on first launch ("More info" → 
 
 ```powershell
 npx electron tools/make-screenshots.js
+dotnet run --project csharp/tools/SyncGlass.Screenshots   # the C# frames, same invented folders
 ```
 
 The preview screenshot also exposed a small defect: its list and the history window still had the light system scrollbar over the dark glass, because the dark style was set on the trees only. It now applies to every scrolling list.
@@ -71,6 +99,8 @@ The preview screenshot also exposed a small defect: its list and the history win
 ## Stack
 
 Electron · vanilla JavaScript · `node --test` · electron-builder
+
+C# 12 · .NET 8 · WPF · CommunityToolkit.Mvvm · xUnit · Inno Setup
 
 ## Licence
 
