@@ -5,7 +5,7 @@
 - Electron (корень): чистая логика в `src/`, IPC и кеши в `main.js`, дерево и выбор
   в `renderer/`. Тесты `npm test` (199).
 - C#/WPF (`csharp/`): `SyncGlass.Core` = src/ + main.js, `SyncGlass.Ui` = renderer.js,
-  `SyncGlass.Wpf` = разметка и стили. Тесты `dotnet test csharp/SyncGlass.sln` (246).
+  `SyncGlass.Wpf` = разметка и стили. Тесты `dotnet test csharp/SyncGlass.sln` (248).
   Имена как в JS, PascalCase. Отличия от JS и грабли переноса - в памяти проекта
   (syncglass-csharp-port, wpf-match-electron-look).
 Общие файлы `%APPDATA%\SyncGlass`, общий замок (канал), один номер версии: package.json,

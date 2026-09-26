@@ -293,6 +293,9 @@ public sealed class Backend
                 sink.Cached(cached.GetRange(i, Math.Min(5000, cached.Count - i)));
             }
         }
+        // Окно уже переложило записи к себе; локальная ссылка держала бы весь кеш
+        // (~120 МБ на 300 тысяч записей) до конца обхода.
+        cached = null;
 
         var index = new Dictionary<string, SizeRow>(StringComparer.Ordinal);
         var data = new CrawlData { LocalPath = localPath, NetworkPath = networkPath };

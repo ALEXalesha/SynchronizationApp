@@ -41,7 +41,7 @@ Since 1.2.0 SyncGlass comes in two builds that do the same job and share everyth
 |---|---|---|
 | Code | repository root: `main.js`, `renderer/`, `src/` | `csharp/` |
 | Download | `SyncGlass Setup 1.2.0.exe`, `SyncGlass-1.2.0-portable.exe` | `SyncGlass-CSharp-Setup-1.2.0.exe`, `SyncGlass-CSharp-1.2.0-portable.exe` |
-| Tests | 199 on `node --test` | 246 on xUnit |
+| Tests | 199 on `node --test` | 248 on xUnit |
 
 - **One set of files.** Settings, history, the size cache and the window position live in `%APPDATA%\SyncGlass` in one format; the C# contract tests read files written by the Electron version itself.
 - **One running copy.** Both take the same single-instance lock (a named pipe), so the two windows can never sync the same folders at once; starting the second brings the first to the front.

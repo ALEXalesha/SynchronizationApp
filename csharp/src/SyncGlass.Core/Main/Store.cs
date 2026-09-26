@@ -41,6 +41,16 @@ public static class Store
         File.WriteAllText(tmp, text);
         FsOps.Rename(tmp, path);
     }
+
+    // То же, но файл пишется потоком: большой файл (кеш размеров - десятки МБ) не
+    // собирается целиком в памяти строкой.
+    public static void WriteAtomicSync(string path, Action<Stream> write)
+    {
+        var tmp = $"{path}.{Interlocked.Increment(ref _seq)}.tmp";
+        using (var fs = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 16))
+            write(fs);
+        FsOps.Rename(tmp, path);
+    }
 }
 
 // Настройки: пути, направление, сортировка, режим размеров. Незнакомые поля
@@ -216,21 +226,21 @@ public sealed class SizeCacheStore(string userData)
 
     // Достоверность проверяем у самого чтения: строка вместо массива, число, запись
     // без пути - всё это уезжало бы в интерфейс как готовые размеры.
+    //
+    // Файл читается и пишется ПОТОКОМ (закон CacheMemoryTests). Раньше кеш на 300 тысяч
+    // записей (49 МБ) читался в строку и разбирался в дерево JsonNode - куча вырастала до
+    // 623 МБ ради списка в 120 МБ, а окно C#-версии держало 1,3 ГБ.
     public async Task<List<SizeEntry>?> Load(string? localPath, string? networkPath)
     {
         try
         {
-            var node = JsonNode.Parse(await File.ReadAllTextAsync(FileFor(localPath, networkPath))) as JsonObject;
-            if (node == null) return null;
-            if ((string?)node["localPath"] != localPath || (string?)node["networkPath"] != networkPath) return null;
-            if (node["entries"] is not JsonArray arr) return null;
-            var outList = new List<SizeEntry>(arr.Count);
-            foreach (var item in arr)
-            {
-                if (item is not JsonObject e || e["relPath"] is not JsonValue rp || !rp.TryGetValue<string>(out var rel)) continue;
-                outList.Add(new SizeEntry(rel, Num<long>(e["sizeLocal"]), Num<int>(e["cntLocal"]), Num<long>(e["sizeNetwork"]), Num<int>(e["cntNetwork"])));
-            }
-            return outList;
+            await using var fs = new FileStream(FileFor(localPath, networkPath), FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16, useAsync: true);
+            var file = await JsonSerializer.DeserializeAsync<CacheFile>(fs, ReadOptions);
+            if (file == null) return null;
+            if (Str(file.LocalPath) != localPath || Str(file.NetworkPath) != networkPath) return null;
+            if (file.Entries == null) return null;
+            file.Entries.RemoveAll(e => e == null);
+            return file.Entries!;
         }
         catch
         {
@@ -238,23 +248,93 @@ public sealed class SizeCacheStore(string userData)
         }
     }
 
-    private static T? Num<T>(JsonNode? n) where T : struct
-        => n is JsonValue v && v.TryGetValue<T>(out var x) ? x : null;
-
-    private static string Serialize(string? localPath, string? networkPath, IEnumerable<SizeEntry> entries)
-        => JsonSerializer.Serialize(new { localPath, networkPath, entries }, Store.WithNulls);
-
-    public async Task Save(string? localPath, string? networkPath, IEnumerable<SizeEntry> entries)
+    // Путь в шапке: нет поля или null - null; строка - строка; другое - кеш негоден.
+    private static string? Str(JsonElement e) => e.ValueKind switch
     {
-        try { await Store.WriteAtomic(FileFor(localPath, networkPath), Serialize(localPath, networkPath, entries)); }
-        catch { /* кеш не критичен */ }
+        JsonValueKind.Undefined or JsonValueKind.Null => null,
+        JsonValueKind.String => e.GetString(),
+        _ => throw new InvalidDataException("путь в кеше не строка"),
+    };
+
+    private sealed class CacheFile
+    {
+        [JsonPropertyName("localPath")] public JsonElement LocalPath { get; set; }
+        [JsonPropertyName("networkPath")] public JsonElement NetworkPath { get; set; }
+        [JsonPropertyName("entries")] public List<SizeEntry?>? Entries { get; set; }
     }
+
+    private static readonly JsonSerializerOptions ReadOptions = new() { Converters = { new EntryReader() } };
+
+    // Одна запись кеша. Достоверность - как раньше: не объект или путь не строка -
+    // запись пропускается; поле не число (или не влезает) - «не посчитано» (null).
+    private sealed class EntryReader : JsonConverter<SizeEntry?>
+    {
+        public override bool HandleNull => true;
+
+        public override SizeEntry? Read(ref Utf8JsonReader r, Type t, JsonSerializerOptions o)
+        {
+            if (r.TokenType != JsonTokenType.StartObject)
+            {
+                r.TrySkip(); // значение уже в буфере целиком; Skip() на потоке бросает
+                return null;
+            }
+            string? rel = null;
+            long? sizeLocal = null, sizeNetwork = null;
+            int? cntLocal = null, cntNetwork = null;
+            while (r.Read() && r.TokenType == JsonTokenType.PropertyName)
+            {
+                if (r.ValueTextEquals("relPath"u8)) { r.Read(); rel = r.TokenType == JsonTokenType.String ? r.GetString() : null; }
+                else if (r.ValueTextEquals("sizeLocal"u8)) { r.Read(); sizeLocal = r.TokenType == JsonTokenType.Number && r.TryGetInt64(out var v) ? v : null; }
+                else if (r.ValueTextEquals("cntLocal"u8)) { r.Read(); cntLocal = r.TokenType == JsonTokenType.Number && r.TryGetInt32(out var v) ? v : null; }
+                else if (r.ValueTextEquals("sizeNetwork"u8)) { r.Read(); sizeNetwork = r.TokenType == JsonTokenType.Number && r.TryGetInt64(out var v) ? v : null; }
+                else if (r.ValueTextEquals("cntNetwork"u8)) { r.Read(); cntNetwork = r.TokenType == JsonTokenType.Number && r.TryGetInt32(out var v) ? v : null; }
+                else r.Read();
+                // Вложенный объект или массив на месте значения; у простого - ничего.
+                // TrySkip, не Skip: значение уже в буфере, а Skip() на потоке бросает всегда.
+                r.TrySkip();
+            }
+            return rel == null ? null : new SizeEntry(rel, sizeLocal, cntLocal, sizeNetwork, cntNetwork);
+        }
+
+        public override void Write(Utf8JsonWriter w, SizeEntry? value, JsonSerializerOptions o) => throw new NotSupportedException();
+    }
+
+    // Запись - тем же порядком полей и тем же экранированием, что JSON.stringify у Electron.
+    private static void WriteCache(Stream s, string? localPath, string? networkPath, IEnumerable<SizeEntry> entries)
+    {
+        using var w = new Utf8JsonWriter(s, new JsonWriterOptions { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping });
+        static void Num(Utf8JsonWriter w, string name, long? v)
+        {
+            if (v is { } x) w.WriteNumber(name, x);
+            else w.WriteNull(name);
+        }
+        w.WriteStartObject();
+        if (localPath != null) w.WriteString("localPath", localPath); else w.WriteNull("localPath");
+        if (networkPath != null) w.WriteString("networkPath", networkPath); else w.WriteNull("networkPath");
+        w.WriteStartArray("entries");
+        foreach (var e in entries)
+        {
+            w.WriteStartObject();
+            w.WriteString("relPath", e.RelPath);
+            Num(w, "sizeLocal", e.SizeLocal);
+            Num(w, "cntLocal", e.CntLocal);
+            Num(w, "sizeNetwork", e.SizeNetwork);
+            Num(w, "cntNetwork", e.CntNetwork);
+            w.WriteEndObject();
+            if (w.BytesPending > 1 << 15) w.Flush(); // в файл кусками, а не всё разом в конце
+        }
+        w.WriteEndArray();
+        w.WriteEndObject();
+    }
+
+    public Task Save(string? localPath, string? networkPath, IEnumerable<SizeEntry> entries)
+        => Task.Run(() => SaveSync(localPath, networkPath, entries));
 
     // При закрытии окна - синхронно, но тоже через временный файл: обрезок вместо
     // целого кеша на сотни тысяч узлов не разбирался, и следующий запуск ждал обход.
     public void SaveSync(string? localPath, string? networkPath, IEnumerable<SizeEntry> entries)
     {
-        try { Store.WriteAtomicSync(FileFor(localPath, networkPath), Serialize(localPath, networkPath, entries)); }
+        try { Store.WriteAtomicSync(FileFor(localPath, networkPath), s => WriteCache(s, localPath, networkPath, entries)); }
         catch { /* кеш не критичен */ }
     }
 
