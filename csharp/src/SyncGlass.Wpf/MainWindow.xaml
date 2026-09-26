@@ -6,7 +6,7 @@
         Title="SyncGlass" Width="900" Height="600" ResizeMode="CanMinimize"
         WindowStartupLocation="CenterScreen" Background="#1C2128"
         FontFamily="Segoe UI" FontSize="13" Foreground="{StaticResource Text}"
-        TextOptions.TextFormattingMode="Display" UseLayoutRounding="True">
+        TextOptions.TextFormattingMode="Display" TextOptions.TextRenderingMode="ClearType" UseLayoutRounding="True">
 
     <!-- Свой заголовок окна, как в Paint Pro: системная белая полоса убрана, заголовком
          служит верхняя панель (за неё окно и таскается). Рамка Windows осталась - тень,
@@ -93,7 +93,7 @@
 
         <Style x:Key="RowName" TargetType="TextBlock">
             <Setter Property="FontSize" Value="12.5" />
-            <Setter Property="FontWeight" Value="Medium" />
+            <Setter Property="FontWeight" Value="SemiBold" />
             <Setter Property="TextTrimming" Value="CharacterEllipsis" />
             <Setter Property="VerticalAlignment" Value="Center" />
             <Style.Triggers>
@@ -131,16 +131,16 @@
                             </Style>
                         </TextBlock.Style>
                     </TextBlock>
-                    <TextBlock DockPanel.Dock="Left" Text="📄" FontSize="11" Opacity="0.6" Margin="0,0,5,0" VerticalAlignment="Center">
-                        <TextBlock.Style>
-                            <Style TargetType="TextBlock">
+                    <Path DockPanel.Dock="Left" Data="{StaticResource FileIcon}" Fill="{StaticResource Text}" Opacity="0.45" Margin="0,0,6,0" VerticalAlignment="Center">
+                        <Path.Style>
+                            <Style TargetType="Path">
                                 <Style.Triggers>
                                     <DataTrigger Binding="{Binding IsDir}" Value="True"><Setter Property="Visibility" Value="Collapsed" /></DataTrigger>
                                     <DataTrigger Binding="{Binding IsPlaceholder}" Value="True"><Setter Property="Visibility" Value="Collapsed" /></DataTrigger>
                                 </Style.Triggers>
                             </Style>
-                        </TextBlock.Style>
-                    </TextBlock>
+                        </Path.Style>
+                    </Path>
                     <TextBlock Style="{StaticResource RowName}" Text="{Binding Name}" />
                 </DockPanel>
             </Border>
@@ -191,16 +191,16 @@
                             </Style>
                         </TextBlock.Style>
                     </TextBlock>
-                    <TextBlock DockPanel.Dock="Left" Text="📄" FontSize="11" Opacity="0.6" Margin="0,0,5,0" VerticalAlignment="Center">
-                        <TextBlock.Style>
-                            <Style TargetType="TextBlock">
+                    <Path DockPanel.Dock="Left" Data="{StaticResource FileIcon}" Fill="{StaticResource Text}" Opacity="0.45" Margin="0,0,6,0" VerticalAlignment="Center">
+                        <Path.Style>
+                            <Style TargetType="Path">
                                 <Style.Triggers>
                                     <DataTrigger Binding="{Binding IsDir}" Value="True"><Setter Property="Visibility" Value="Collapsed" /></DataTrigger>
                                     <DataTrigger Binding="{Binding IsPlaceholder}" Value="True"><Setter Property="Visibility" Value="Collapsed" /></DataTrigger>
                                 </Style.Triggers>
                             </Style>
-                        </TextBlock.Style>
-                    </TextBlock>
+                        </Path.Style>
+                    </Path>
                     <TextBlock Style="{StaticResource RowName}" Text="{Binding Name}" />
                 </DockPanel>
             </Border>
@@ -300,6 +300,21 @@
         </Canvas>
 
         <Grid Margin="10">
+            <!-- Под окном предпросмотра или истории окно размыто, как backdrop-filter: blur(4px)
+                 у Electron. Размытие только пока открыт слой: за ним окно почти не меняется,
+                 так что пересчёт эффекта редкий (урок Paint Pro про дорогие эффекты). -->
+            <Grid.Style>
+                <Style TargetType="Grid">
+                    <Style.Triggers>
+                        <DataTrigger Binding="{Binding Preview.IsOpen}" Value="True">
+                            <Setter Property="Effect"><Setter.Value><BlurEffect Radius="9" RenderingBias="Performance" /></Setter.Value></Setter>
+                        </DataTrigger>
+                        <DataTrigger Binding="{Binding History.IsOpen}" Value="True">
+                            <Setter Property="Effect"><Setter.Value><BlurEffect Radius="9" RenderingBias="Performance" /></Setter.Value></Setter>
+                        </DataTrigger>
+                    </Style.Triggers>
+                </Style>
+            </Grid.Style>
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto" />
                 <RowDefinition Height="Auto" />
@@ -345,7 +360,7 @@
                     <DockPanel Margin="14,6">
                         <Ellipse DockPanel.Dock="Left" Style="{StaticResource StatusDot}" Margin="0,0,9,0" />
                         <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
-                            <TextBlock Text="Размеры" Style="{StaticResource Dim}" VerticalAlignment="Center" Margin="12,0,6,0"
+                            <TextBlock Text="Размеры" Style="{StaticResource Dim}" FontSize="12" VerticalAlignment="Center" Margin="12,0,6,0"
                                        ToolTip="Подсчёт размеров и числа файлов в фоне. «До 300k» — безопасный предел; «Все» — без ограничения (нужно больше памяти)." />
                             <ComboBox x:Name="SizeModeBox" Style="{StaticResource GlassCombo}" SelectedValuePath="Tag"
                                       SelectedValue="{Binding SizeMode, Mode=OneWay}" SelectionChanged="SizeMode_Changed">
@@ -353,7 +368,7 @@
                                 <ComboBoxItem Tag="capped" Content="До 300k" />
                                 <ComboBoxItem Tag="full" Content="Все" />
                             </ComboBox>
-                            <TextBlock Text="Сортировка" Style="{StaticResource Dim}" VerticalAlignment="Center" Margin="12,0,6,0" ToolTip="Порядок в дереве" />
+                            <TextBlock Text="Сортировка" Style="{StaticResource Dim}" FontSize="12" VerticalAlignment="Center" Margin="12,0,6,0" ToolTip="Порядок в дереве" />
                             <ComboBox x:Name="SortBox" Style="{StaticResource GlassCombo}" SelectedValuePath="Tag"
                                       SelectedValue="{Binding Sort, Mode=OneWay}" SelectionChanged="Sort_Changed">
                                 <ComboBoxItem Tag="name" Content="По имени" />
@@ -468,14 +483,14 @@
                         <TextBlock Text="Локальная папка" FontSize="11" Foreground="{StaticResource TextDim}" Margin="2,0,0,5" />
                         <DockPanel>
                             <Button DockPanel.Dock="Right" Style="{StaticResource GlassButton}" Content="Обзор…" Margin="6,0,0,0" Tag="local" Click="Pick_Click" />
-                            <TextBox Style="{StaticResource PathBox}" Text="{Binding LocalPath, Mode=OneWay}" />
+                            <ContentControl Style="{StaticResource PathBox}" Content="{Binding LocalPath}" />
                         </DockPanel>
                     </StackPanel>
                     <StackPanel Grid.Column="2">
                         <TextBlock Text="Сетевая папка" FontSize="11" Foreground="{StaticResource TextDim}" Margin="2,0,0,5" />
                         <DockPanel>
                             <Button DockPanel.Dock="Right" Style="{StaticResource GlassButton}" Content="Обзор…" Margin="6,0,0,0" Tag="network" Click="Pick_Click" />
-                            <TextBox Style="{StaticResource PathBox}" Text="{Binding NetworkPath, Mode=OneWay}" />
+                            <ContentControl Style="{StaticResource PathBox}" Content="{Binding NetworkPath}" />
                         </DockPanel>
                     </StackPanel>
                     <Button Grid.Column="4" Style="{StaticResource PrimaryButton}" Content="Синхронизировать" VerticalAlignment="Bottom"

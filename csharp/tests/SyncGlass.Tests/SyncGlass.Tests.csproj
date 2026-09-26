@@ -1,7 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <RootNamespace>SyncGlass.Tests</RootNamespace>
@@ -17,11 +18,13 @@
 
   <ItemGroup>
     <Using Include="Xunit" />
+    <Using Include="System.IO" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\SyncGlass.Core\SyncGlass.Core.csproj" />
     <ProjectReference Include="..\..\src\SyncGlass.Ui\SyncGlass.Ui.csproj" />
+    <ProjectReference Include="..\..\src\SyncGlass.Wpf\SyncGlass.Wpf.csproj" />
   </ItemGroup>
 
 </Project>

@@ -26,6 +26,10 @@
     <SolidColorBrush x:Key="WarnBg" Color="#1FB39A63" />
     <SolidColorBrush x:Key="WarnBorder" Color="#4DB39A63" />
 
+    <!-- Значок файла в дереве. В Electron это цветной эмодзи 📄 - WPF цветные шрифты не
+         рисует, контурный 📄 выглядел иначе; здесь залитый лист с загнутым углом. -->
+    <Geometry x:Key="FileIcon">M0,0 H5.5 V3.5 H9 V11 H0 Z M6.3,0 L9,2.7 H6.3 Z</Geometry>
+
     <!-- Стеклянная поверхность -->
     <Style x:Key="Glass" TargetType="Border">
         <Setter Property="Background" Value="{StaticResource GlassBg}" />
@@ -48,7 +52,7 @@
         <Setter Property="BorderThickness" Value="1" />
         <Setter Property="Padding" Value="14,7" />
         <Setter Property="FontSize" Value="12.5" />
-        <Setter Property="FontWeight" Value="Medium" />
+        <Setter Property="FontWeight" Value="SemiBold" />
         <Setter Property="Cursor" Value="Hand" />
         <Setter Property="FocusVisualStyle" Value="{x:Null}" />
         <Setter Property="Template">
@@ -103,7 +107,7 @@
         <Setter Property="WindowChrome.IsHitTestVisibleInChrome" Value="True" />
         <Setter Property="Foreground" Value="{StaticResource TextDim}" />
         <Setter Property="FontSize" Value="12.5" />
-        <Setter Property="FontWeight" Value="Medium" />
+        <Setter Property="FontWeight" Value="SemiBold" />
         <Setter Property="Cursor" Value="Hand" />
         <Setter Property="FocusVisualStyle" Value="{x:Null}" />
         <Setter Property="Template">
@@ -141,9 +145,14 @@
                                 <Rectangle x:Name="Dash" Width="8" Height="2" RadiusX="1" RadiusY="1" Fill="White" Visibility="Collapsed" />
                             </Grid>
                         </Border>
-                        <ContentPresenter Margin="7,0,0,0" VerticalAlignment="Center" />
+                        <ContentPresenter x:Name="Label" Margin="7,0,0,0" VerticalAlignment="Center" />
                     </StackPanel>
                     <ControlTemplate.Triggers>
+                        <!-- Флажок строки дерева без подписи: отступ под подпись раздвигал
+                             строку (16 + 7 вместо 16), имя папки уезжало вправо от Electron. -->
+                        <Trigger Property="HasContent" Value="False">
+                            <Setter TargetName="Label" Property="Margin" Value="0" />
+                        </Trigger>
                         <Trigger Property="IsChecked" Value="True">
                             <Setter TargetName="Box" Property="Background" Value="{StaticResource Accent}" />
                             <Setter TargetName="Box" Property="BorderBrush" Value="Transparent" />
@@ -241,17 +250,31 @@
         </Setter>
     </Style>
 
-    <!-- Поле пути: утопленное, только для чтения -->
-    <Style x:Key="PathBox" TargetType="TextBox">
-        <Setter Property="IsReadOnly" Value="True" />
+    <!-- Поле пути: утопленное, только для чтения (в Electron - input readonly). Длинный
+         путь обрезается многоточием, целиком - в подсказке; пустое поле показывает
+         образец пути, как placeholder. -->
+    <Style x:Key="PathBox" TargetType="ContentControl">
         <Setter Property="Foreground" Value="{StaticResource Text}" />
         <Setter Property="FontSize" Value="12" />
+        <Setter Property="Focusable" Value="False" />
+        <Setter Property="ToolTip" Value="{Binding Content, RelativeSource={RelativeSource Self}}" />
         <Setter Property="Template">
             <Setter.Value>
-                <ControlTemplate TargetType="TextBox">
-                    <Border Background="#47000000" BorderBrush="{StaticResource GlassBorder}" BorderThickness="1" CornerRadius="7" Padding="10,7">
-                        <ScrollViewer x:Name="PART_ContentHost" VerticalAlignment="Center" />
+                <ControlTemplate TargetType="ContentControl">
+                    <Border Background="#47000000" BorderBrush="{StaticResource GlassBorder}" BorderThickness="1" CornerRadius="7" Padding="11,8">
+                        <Grid>
+                            <TextBlock x:Name="Hint" Text="C:\Users\...\Documents" Foreground="#59DFE3E8" Visibility="Collapsed" />
+                            <TextBlock Text="{TemplateBinding Content}" TextTrimming="CharacterEllipsis" />
+                        </Grid>
                     </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="Content" Value="{x:Null}">
+                            <Setter TargetName="Hint" Property="Visibility" Value="Visible" />
+                        </Trigger>
+                        <Trigger Property="Content" Value="">
+                            <Setter TargetName="Hint" Property="Visibility" Value="Visible" />
+                        </Trigger>
+                    </ControlTemplate.Triggers>
                 </ControlTemplate>
             </Setter.Value>
         </Setter>
@@ -271,6 +294,9 @@
         </Setter>
     </Style>
     <Style x:Key="PlainList" TargetType="ListBox">
+        <!-- Цвет текста задан явно: иначе список берёт его из светлой системной темы, и
+             имена папок выходили чёрными на тёмном стекле (закон - WindowTests). -->
+        <Setter Property="Foreground" Value="{StaticResource Text}" />
         <Setter Property="Background" Value="Transparent" />
         <Setter Property="BorderThickness" Value="0" />
         <Setter Property="Padding" Value="0" />
