@@ -9,7 +9,7 @@
 ; The version must match package.json and SyncGlass.Wpf.csproj (ReleaseTests checks it).
 
 #define MyAppName "SyncGlass C#"
-#define MyAppVersion "1.2.2"
+#define MyAppVersion "1.2.3"
 #define MyAppPublisher "SyncGlass"
 #define MyAppExeName "SyncGlass.exe"
 

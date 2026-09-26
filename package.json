@@ -1,6 +1,6 @@
 {
   "name": "syncglass",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "description": "Синхронизация папок между ноутбуком и сетевым компьютером с liquid glass интерфейсом",
   "main": "main.js",
   "author": "ALEXaloysha",

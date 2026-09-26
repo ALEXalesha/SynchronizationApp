@@ -4,6 +4,16 @@ What changed for the user in each release. The full text of each release, in Eng
 Russian, is in [docs/release-notes](docs/release-notes) (from 1.2.0) and on the
 [releases page](https://github.com/ALEXalesha/SynchronizationApp/releases).
 
+## 1.2.3 - 2026-09-26 - checkmark in the middle
+
+- Both versions: the checkmark sat almost a pixel right of and nearly two pixels below the
+  middle of the box, in Electron itself too, so matching Electron in 1.2.2 kept it off
+  centre. It now sits in the middle of the box in both versions; a test measures its
+  centre in the Electron reference and in the WPF render.
+- C# tests no longer start the real program: they took the single-copy lock and opened a
+  window on the real `%APPDATA%` data, and with SyncGlass running every window test failed.
+  261 C# tests and 202 JavaScript tests.
+
 ## 1.2.2 - 2026-09-26 - checkmarks in place
 
 - C#: the checkmark sat one pixel right of and below where Electron draws it. The window

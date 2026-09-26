@@ -20,6 +20,7 @@ internal static class WpfHost
         using var ready = new ManualResetEventSlim();
         var t = new Thread(() =>
         {
+            App.StylesOnly = true; // без замка «одна копия» и настоящего окна - см. App.StylesOnly
             var app = new App();
             app.InitializeComponent(); // стили Glass.xaml
             d = Dispatcher.CurrentDispatcher;
@@ -297,6 +298,26 @@ public class WindowTests
         return mask;
     }
 
+    private static bool[,] Or(bool[,] a, bool[,] b)
+    {
+        var r = new bool[a.GetLength(0), a.GetLength(1)];
+        for (var x = 0; x < a.GetLength(0); x++)
+            for (var y = 0; y < a.GetLength(1); y++) r[x, y] = a[x, y] || b[x, y];
+        return r;
+    }
+
+    private static bool[,] Shift(bool[,] a, int dx, int dy)
+    {
+        var r = new bool[a.GetLength(0), a.GetLength(1)];
+        for (var x = 0; x < a.GetLength(0); x++)
+            for (var y = 0; y < a.GetLength(1); y++)
+            {
+                int sx = x - dx, sy = y - dy;
+                if (sx >= 0 && sy >= 0 && sx < a.GetLength(0) && sy < a.GetLength(1)) r[x, y] = a[sx, sy];
+            }
+        return r;
+    }
+
     private static (double iou, double dx, double dy) Compare(bool[,] a, bool[,] b)
     {
         int inter = 0, union = 0; double ax = 0, ay = 0, bx = 0, by = 0; int an = 0, bn = 0;
@@ -357,11 +378,17 @@ public class WindowTests
         });
         var reference = new PngBitmapDecoder(new Uri(Path.Combine(AppContext.BaseDirectory, "look", $"checkbox-{name}-electron-4x.png")),
             BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnLoad).Frames[0];
-        var (boxIou, _, _) = Compare(wpfBox!, AccentMask(reference));
-        var (iou, dx, dy) = Compare(wpf!, WhiteMask(reference));
+        // Квадрат - синее вместе с белым: галочка лежит на нём и в маску синего не входит.
+        var (boxIou, _, _) = Compare(Or(wpfBox!, wpf!), Or(AccentMask(reference), WhiteMask(reference)));
+        // Галочка: форма - после совмещения центров, сдвиг - отдельно и не больше 0.6 px в
+        // натуральную величину (2.4 при 4x). В 4x Chromium ставит её ровно на left 5.5, а в
+        // 1x - на целый пиксель, как черту; окно округляет так же, поэтому в разметке 5, и
+        // главный закон - сравнение в 1x выше.
+        var (_, dx, dy) = Compare(wpf!, WhiteMask(reference));
+        var (iou, _, _) = Compare(Shift(wpf!, -(int)Math.Round(dx), -(int)Math.Round(dy)), WhiteMask(reference));
         Assert.True(boxIou > 0.97, $"квадрат флажка совпадает на {boxIou:P0}: у WPF без рамки он меньше");
-        Assert.True(iou > 0.85 && Math.Abs(dx) < 1 && Math.Abs(dy) < 1,
-            $"совпадение {iou:P0}, сдвиг центра ({dx:F1}; {dy:F1}) px при увеличении 4x");
+        Assert.True(iou > 0.85 && Math.Abs(dx) <= 2.4 && Math.Abs(dy) <= 2.4,
+            $"форма совпадает на {iou:P0}, сдвиг центра ({dx:F1}; {dy:F1}) px при увеличении 4x");
     }
     // Закон: флажки в настоящем окне, в натуральную величину, - как у Electron 1x. Второй
     // раз «галочки кривые» (26.09.2026): сравнение в 4x проходило, а в окне галочка сидела
@@ -446,6 +473,55 @@ public class WindowTests
         var bmp = await RenderCheck(null, 1);
         var d = Diff(Lum(bmp), Lum(Look("checkbox-mixed-electron-1x.png")));
         Assert.True(d < 6, $"черта отличается от Electron в среднем на {d:F1} из 255");
+    }
+
+    // Закон: тестовое окно не запускает программу - ни замка «одна копия», ни окна на
+    // настоящих данных; тесты окна проходят и при запущенном SyncGlass.
+    [Fact]
+    public async Task тесты_окна_не_запускают_программу()
+    {
+        var (окон, закрывается, режим) = (-1, true, ShutdownMode.OnMainWindowClose);
+        await WpfHost.Run(async () =>
+        {
+            await Task.Delay(100); // запуск Application идёт из очереди диспетчера
+            окон = Application.Current.Windows.OfType<MainWindow>().Count();
+            закрывается = Application.Current.Dispatcher.HasShutdownStarted;
+            режим = Application.Current.ShutdownMode;
+        });
+        Assert.Equal(0, окон);
+        Assert.False(закрывается);
+        Assert.Equal(ShutdownMode.OnExplicitShutdown, режим); // закрытое тестовое окно не гасит остальные тесты
+    }
+
+    // Закон: галочка - посередине квадрата. Третий раз «галочки кривые» (26.09.2026, «подними
+    // чуть повыше и чуть левее»): C# уже совпадал с Electron, но у самого Electron галочка
+    // сидела на 0.9 px правее и на 1.7 px ниже середины. Середина - центр тяжести белого
+    // сверх цвета квадрата; проверяются и эталон Electron, и кадр WPF.
+    private static (double x, double y) Ink(double[,] l)
+    {
+        double sx = 0, sy = 0, sw = 0, фон = l[7, 1];
+        for (var x = 0; x < 16; x++)
+            for (var y = 0; y < 16; y++)
+            {
+                var w = Math.Max(0, l[x, y] - фон - 8);
+                sx += w * x; sy += w * y; sw += w;
+            }
+        return (sx / sw, sy / sw);
+    }
+
+    [Theory]
+    [InlineData("electron")]
+    [InlineData("wpf")]
+    public async Task галочка_посередине_квадрата(string source)
+    {
+        // Эталон читается тоже в потоке окна: картинка, открытая в потоке теста раньше окна,
+        // заводила там свой Dispatcher, и остальные тесты окна падали с «идёт завершение работы».
+        double[,]? l = null;
+        var wpf = source == "wpf" ? await RenderCheck(true, 1) : null;
+        await WpfHost.Run(() => { l = Lum(wpf ?? Look("checkbox-checked-electron-1x.png")); return Task.CompletedTask; });
+        var (x, y) = Ink(l!);
+        Assert.True(Math.Abs(x - 7.5) < 0.5 && Math.Abs(y - 7.5) < 0.5,
+            $"галочка {source}: центр ({x:F2}; {y:F2}), середина квадрата (7.5; 7.5)");
     }
 }
 

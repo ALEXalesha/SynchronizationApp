@@ -511,11 +511,13 @@ input[type="checkbox"]:checked {
   background: var(--accent);
   border-color: transparent;
 }
+/* Галочка - посередине квадрата: при left 5 / top 1.5 она сидела на пиксель правее и
+   на 1.7 ниже середины («подними чуть повыше и чуть левее», 26.09.2026). */
 input[type="checkbox"]:checked::after {
   content: "";
   position: absolute;
-  left: 5px;
-  top: 1.5px;
+  left: 4px;
+  top: -0.5px;
   width: 4px;
   height: 8px;
   border: solid #fff;

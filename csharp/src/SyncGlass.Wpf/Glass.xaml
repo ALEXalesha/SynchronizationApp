@@ -149,9 +149,11 @@
                                  справа, повёрнутый на 45 градусов; 6x10, а не 4x8: * { box-sizing:
                                  border-box } на ::after не действует. Не внутри рамки: окно округляет
                                  разметку, рамка 1.5 становится 2, и галочка съезжала на пиксель вправо
-                                 и вниз - «галочки кривые» (Алексей, 26.09.2026, дважды). -->
+                                 и вниз - «галочки кривые» (Алексей, 26.09.2026, дважды). Третий раз - «подними чуть
+                                 повыше и чуть левее»: у самого Electron она была ниже середины на 1.7 px и
+                                 правее на 0.9; теперь left 4 / top -0.5 там и 5 / 1 здесь (5.5 окно округлило бы к чётному 6). -->
                             <Canvas>
-                                <Border x:Name="Tick" Canvas.Left="6.5" Canvas.Top="3" Width="6" Height="10"
+                                <Border x:Name="Tick" Canvas.Left="5" Canvas.Top="1" Width="6" Height="10"
                                         BorderBrush="White" BorderThickness="0,0,2,2" RenderTransformOrigin="0.5,0.5" Visibility="Collapsed">
                                     <Border.RenderTransform><RotateTransform Angle="45" /></Border.RenderTransform>
                                 </Border>

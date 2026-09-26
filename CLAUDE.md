@@ -5,12 +5,16 @@
 - Electron (корень): чистая логика в `src/`, IPC и кеши в `main.js`, дерево и выбор
   в `renderer/`. Тесты `npm test` (202).
 - C#/WPF (`csharp/`): `SyncGlass.Core` = src/ + main.js, `SyncGlass.Ui` = renderer.js,
-  `SyncGlass.Wpf` = разметка и стили. Тесты `dotnet test csharp/SyncGlass.sln` (258).
+  `SyncGlass.Wpf` = разметка и стили. Тесты `dotnet test csharp/SyncGlass.sln` (261).
   Имена как в JS, PascalCase. Отличия от JS и грабли переноса - в памяти проекта
   (syncglass-csharp-port, wpf-match-electron-look).
 Общие файлы `%APPDATA%\SyncGlass`, общий замок (канал), один номер версии: package.json,
 csproj и `csharp/installer/SyncGlass.iss` сверяет ReleaseTests, он же требует
 `docs/release-notes/vX.md` (английский, потом русский).
+Флажок C# сверяется с эталонами Electron в `csharp/tests/SyncGlass.Tests/look/`: после
+правки флажка в `renderer/styles.css` - `npx electron tools/make-checkbox-look.js`.
+Тесты окна поднимают `App` с `App.StylesOnly = true`: иначе конструктор Application сам
+вызывает OnStartup - замок «одна копия» и настоящее окно на настоящих данных.
 
 ## Ревизия на баги: порядок действий
 
