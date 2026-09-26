@@ -3,9 +3,9 @@
 Только Windows. Синхронизация двух папок в одну сторону. С 1.2.0 две версии,
 любая правка - в обе:
 - Electron (корень): чистая логика в `src/`, IPC и кеши в `main.js`, дерево и выбор
-  в `renderer/`. Тесты `npm test` (199).
+  в `renderer/`. Тесты `npm test` (202).
 - C#/WPF (`csharp/`): `SyncGlass.Core` = src/ + main.js, `SyncGlass.Ui` = renderer.js,
-  `SyncGlass.Wpf` = разметка и стили. Тесты `dotnet test csharp/SyncGlass.sln` (248).
+  `SyncGlass.Wpf` = разметка и стили. Тесты `dotnet test csharp/SyncGlass.sln` (257).
   Имена как в JS, PascalCase. Отличия от JS и грабли переноса - в памяти проекта
   (syncglass-csharp-port, wpf-match-electron-look).
 Общие файлы `%APPDATA%\SyncGlass`, общий замок (канал), один номер версии: package.json,
@@ -18,7 +18,7 @@ csproj и `csharp/installer/SyncGlass.iss` сверяет ReleaseTests, он ж�
 и проверено мутацией. Поэтому **читать исходники, чтобы выяснить, что уже починено,
 не нужно никогда** - это самая дорогая и самая бесполезная часть ревизии.
 
-1. `npm test` - 20 секунд, 199 тестов (и `dotnet test csharp/SyncGlass.sln` - C#). Зелёный набор и есть инвентарь закрытого.
+1. `npm test` - 20 секунд, 202 теста (и `dotnet test csharp/SyncGlass.sln` - C#). Зелёный набор и есть инвентарь закрытого.
 2. Фуззеры в `test/invariants.test.js`, тринадцать законов. Дали ноль - сомневаться
    в генераторе, а не радоваться. В README есть раздел «Чего эти законы
    не спрашивают»: следующая находка почти наверняка лежит там.

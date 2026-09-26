@@ -4,6 +4,21 @@ What changed for the user in each release. The full text of each release, in Eng
 Russian, is in [docs/release-notes](docs/release-notes) (from 1.2.0) and on the
 [releases page](https://github.com/ALEXalesha/SynchronizationApp/releases).
 
+## 1.2.1 - 2026-09-26 - no more stutter; checkboxes like the original
+
+- Every refresh restarted the size scan, which re-read the 49 MB size cache from disk and
+  poured 300,000 entries back into the window; switching the sort to date did the same.
+  The heap grew to 900 MB and garbage collection froze the window for up to 1.6 s. Now the
+  cache is sent only to a window that has no sizes yet, and sorting never restarts the
+  scan (both versions).
+- C#: expanding a history entry with 5,000 files took 8 s, opening a history of 200 runs
+  1.2 s - both lists now build only the visible rows (14 ms and 65 ms). Expanding a folder
+  in the tree no longer rebuilds the whole list (90 ms to 13 ms). The history file is read
+  off the window thread.
+- C#: checked checkboxes shrank to 13 px and the tick was drawn by its own crooked line;
+  both now match the Electron checkbox, checked by comparing 4x renders.
+- 257 C# tests and 202 JavaScript tests.
+
 ## 1.2.0 - 2026-09-26 - two versions: Electron and C#/WPF
 
 - **C# version (new)**: the same window, tree, preview, history and rules in C# with WPF.

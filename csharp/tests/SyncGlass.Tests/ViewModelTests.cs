@@ -14,6 +14,7 @@ internal sealed class FakeApi : IApi
     public List<HistoryRun> HistoryAnswer { get; set; } = new();
     public AppSettings SettingsAnswer { get; set; } = new();
     public int Crawls, Stops, ListCalls;
+    public readonly List<bool> CrawlSkips = new();
 
     public Task<AppSettings> GetSettings() => Task.FromResult(SettingsAnswer);
     public Task SaveSettings(AppSettings settings) => Task.CompletedTask;
@@ -30,9 +31,10 @@ internal sealed class FakeApi : IApi
     public void CancelPreview() { }
     public Task<SyncResult> Sync(SyncArgs args, IProgress<SyncProgress>? progress) => Task.FromResult(SyncAnswer ?? new SyncResult());
     public void CancelSync() { }
-    public Task<CrawlResult> StartCrawl(string? l, string? n, bool noLimit, ICrawlSink sink)
+    public Task<CrawlResult> StartCrawl(string? l, string? n, bool noLimit, bool skipCached, ICrawlSink sink)
     {
         Crawls++;
+        CrawlSkips.Add(skipCached);
         return Task.FromResult(new CrawlResult(true));
     }
     public void StopCrawl() => Stops++;
@@ -519,5 +521,97 @@ public class ViewModelTests
         vm.NetworkPath = "N";
         vm.UpdateControls();
         Assert.True(vm.CanSync);
+    }
+
+    // Закон: перезапуск обхода не переливает в окно кеш, который в окне уже есть. Нашёл
+    // Алексей 26.09.2026 («быстро делаю действия - подтормаживает»); замер на его данных:
+    // каждое «Обновить» и переход на сортировку по дате читали с диска кеш на 300 тысяч
+    // записей (49 МБ) и заново вливали его в окно - сотни мегабайт мусора, куча до 900 МБ
+    // и паузы сборки мусора до 1,6 с. Кеш нужен только окну, в котором размеров ещё нет.
+    [Fact]
+    public async Task перезапуск_обхода_не_переливает_кеш_который_уже_в_окне()
+    {
+        var api = new FakeApi
+        {
+            SettingsAnswer = new AppSettings { LocalPath = "L", NetworkPath = "N", SizeMode = "capped" },
+            List = _ => new ListResult([Dto("док")], true, true),
+        };
+        var vm = Fresh(api);
+        await vm.Init();
+        Assert.Equal([false], api.CrawlSkips);           // окно пустое - кеш нужен
+
+        vm.MergeSizes([new SizeEntry("док", 10, 1, 10, 1)]);
+        await vm.Refresh(true);
+        Assert.Equal([false, true], api.CrawlSkips);     // размеры уже в окне
+
+        vm.ChangeSizeMode("off");
+        vm.ChangeSizeMode("capped");
+        Assert.False(api.CrawlSkips[^1]);                // размеры сброшены - кеш снова нужен
+
+        vm.MergeSizes([new SizeEntry("док", 10, 1, 10, 1)]);
+        vm.SetPath("local", "L2");
+        vm.SizeMap.Clear();                              // так делает смена папки (PickFolder)
+        await vm.Refresh(true);
+        Assert.False(api.CrawlSkips[^1]);
+    }
+
+    // Закон: смена сортировки не перезапускает обход размеров. Для сортировки по дате нужны
+    // только даты папок - список перечитывается, а обход 300 тысяч файлов заново строил
+    // индекс, и паузы сборки мусора держали окно до 1,5 с на каждом переключении (замер
+    // на данных Алексея, 26.09.2026).
+    [Fact]
+    public async Task смена_сортировки_не_перезапускает_обход()
+    {
+        var api = new FakeApi
+        {
+            SettingsAnswer = new AppSettings { LocalPath = "L", NetworkPath = "N", SizeMode = "capped", Sort = "name" },
+            List = _ => new ListResult([Dto("док", mtime: 5), Dto("арх", mtime: 9)], true, true),
+        };
+        var vm = Fresh(api);
+        await vm.Init();
+        var обходов = api.Crawls;
+        var списков = api.ListCalls;
+
+        await vm.SetSort("date");
+        Assert.Equal(обходов, api.Crawls);
+        Assert.True(api.ListCalls > списков, "даты папок перечитываются");
+        Assert.Equal(["арх", "док"], vm.Rows.Select(r => r.Name));   // новые сверху
+
+        await vm.SetSort("name");
+        await vm.SetSort("date");
+        Assert.Equal(обходов, api.Crawls);
+    }
+
+    // Закон: раскрытие и сворачивание папки добавляют и убирают только её строки, а не
+    // пересоздают весь список. Замер 26.09.2026 на данных Алексея: список очищался целиком
+    // (Reset), WPF строил все строки дерева заново - ~90 мс на каждый щелчок по стрелке.
+    [Fact]
+    public async Task раскрытие_папки_правит_список_только_её_строками()
+    {
+        var api = new FakeApi
+        {
+            SettingsAnswer = new AppSettings { LocalPath = "L", NetworkPath = "N", SizeMode = "off" },
+            List = rel => rel == "б"
+                ? new ListResult([Dto("б/1"), Dto("б/2"), Dto("б/3", false)], true, true)
+                : new ListResult([Dto("а"), Dto("б"), Dto("в")], true, true),
+        };
+        var vm = Fresh(api);
+        await vm.Init();
+        var было = vm.Rows.ToList();
+        var события = new List<System.Collections.Specialized.NotifyCollectionChangedAction>();
+        vm.Rows.CollectionChanged += (_, e) => события.Add(e.Action);
+
+        await vm.ToggleExpand(vm.Roots.Single(n => n.Name == "б"));
+        Assert.Equal(["а", "б", "1", "2", "3", "в"], vm.Rows.Select(r => r.Name));
+        Assert.DoesNotContain(System.Collections.Specialized.NotifyCollectionChangedAction.Reset, события);
+        Assert.Equal(3, события.Count(a => a == System.Collections.Specialized.NotifyCollectionChangedAction.Add));
+        Assert.Same(было[2], vm.Rows[5]);                  // строка «в» та же, не новая
+
+        события.Clear();
+        await vm.ToggleExpand(vm.Roots.Single(n => n.Name == "б"));
+        Assert.Equal(["а", "б", "в"], vm.Rows.Select(r => r.Name));
+        Assert.Equal(3, события.Count);
+        Assert.All(события, a => Assert.Equal(System.Collections.Specialized.NotifyCollectionChangedAction.Remove, a));
+        Assert.Equal(было, vm.Rows.ToList());
     }
 }

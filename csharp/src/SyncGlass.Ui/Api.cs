@@ -20,7 +20,7 @@ public interface IApi
     void CancelPreview();
     Task<SyncResult> Sync(SyncArgs args, IProgress<SyncProgress>? progress);
     void CancelSync();
-    Task<CrawlResult> StartCrawl(string? localPath, string? networkPath, bool noLimit, ICrawlSink sink);
+    Task<CrawlResult> StartCrawl(string? localPath, string? networkPath, bool noLimit, bool skipCached, ICrawlSink sink);
     void StopCrawl();
 }
 
@@ -40,7 +40,7 @@ public sealed class BackendApi(Backend backend, Func<Task<string?>> pickFolder) 
     public Task<SyncResult> Sync(SyncArgs args, IProgress<SyncProgress>? progress) => Task.Run(() => backend.Sync(args, progress));
     public void CancelSync() => backend.CancelSync();
     // Обход ждать нельзя: он идёт в фоне, окно получает размеры через sink.
-    public Task<CrawlResult> StartCrawl(string? localPath, string? networkPath, bool noLimit, ICrawlSink sink)
-        => Task.Run(() => backend.StartCrawl(localPath, networkPath, noLimit, sink));
+    public Task<CrawlResult> StartCrawl(string? localPath, string? networkPath, bool noLimit, bool skipCached, ICrawlSink sink)
+        => Task.Run(() => backend.StartCrawl(localPath, networkPath, noLimit, skipCached, sink));
     public void StopCrawl() => backend.StopCrawl();
 }

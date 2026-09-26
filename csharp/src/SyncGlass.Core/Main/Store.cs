@@ -159,19 +159,25 @@ public sealed class HistoryStore(string userData)
 
     // Битые записи отсеиваем у самого чтения: одна запись null в файле - и окно
     // истории обрывалось на полуслове.
-    public async Task<List<HistoryRun>> Load()
+    // Разбор - в пуле потоков и через JsonDocument (буферы из пула): через JsonNode он шёл в
+    // потоке окна после чтения файла и на 2,2 МБ истории выделял 161 МБ (замер 26.09.2026).
+    public Task<List<HistoryRun>> Load() => Task.Run(LoadSync);
+
+    // Синхронное ядро - его и меряют законы памяти: счётчик своего потока, а не процесса.
+    public List<HistoryRun> LoadSync()
     {
+        var outList = new List<HistoryRun>();
         try
         {
-            var node = JsonNode.Parse(await File.ReadAllTextAsync(Path));
-            if (node is not JsonArray arr) return new List<HistoryRun>();
-            var outList = new List<HistoryRun>();
-            foreach (var item in arr)
+            using var fs = File.OpenRead(Path);
+            using var doc = JsonDocument.Parse(fs);
+            if (doc.RootElement.ValueKind != JsonValueKind.Array) return outList;
+            foreach (var item in doc.RootElement.EnumerateArray())
             {
-                if (item is not JsonObject obj) continue;
+                if (item.ValueKind != JsonValueKind.Object) continue;
                 try
                 {
-                    var run = obj.Deserialize<HistoryRun>(Store.Compact);
+                    var run = item.Deserialize<HistoryRun>(Store.Compact);
                     if (run != null) outList.Add(run);
                 }
                 catch

@@ -226,6 +226,9 @@ function startCrawlIfEnabled() {
     localPath: state.localPath,
     networkPath: state.networkPath,
     noLimit: state.sizeMode === 'full',
+    // Размеры уже в окне (sizeMap чистится при смене папки и выключении размеров) —
+    // кеш с диска не нужен: обход и так пришлёт свежие.
+    skipCached: state.sizeMap.size > 0,
   });
 }
 
@@ -266,8 +269,9 @@ el.sortMode.addEventListener('change', () => {
   const prev = state.sort;
   state.sort = el.sortMode.value;
   persist();
-  // Для сортировки по дате нужно подтянуть даты (по имени они не грузятся).
-  if (state.sort === 'date' && prev !== 'date') refresh({ force: false });
+  // Для сортировки по дате нужно подтянуть даты (по имени они не грузятся). Обход
+  // размеров от сортировки не зависит — его не перезапускаем.
+  if (state.sort === 'date' && prev !== 'date') refresh({ force: false, recrawl: false });
   else renderTree();
 });
 
@@ -354,12 +358,16 @@ function pruneMarks({ localOk, networkOk }) {
 }
 
 // ---- Загрузка дерева ----
-async function refresh({ force = false } = {}) {
+// recrawl: false — только перечитать список (сортировке по дате нужны даты). Перезапуск
+// обхода заново строит индекс на 300 тысяч файлов (замер 26.09.2026).
+async function refresh({ force = false, recrawl = true } = {}) {
   if (!state.localPath && !state.networkPath) return;
   const gen = ++state.scanGen;
 
   state.expanded.clear();
-  setStatus('busy', 'Читаю список папок…');
+  const was = [el.sbDot.className.replace('sb-dot', '').trim(), el.sbText.textContent, el.sbSummary.textContent];
+  const reading = 'Читаю список папок…';
+  setStatus('busy', reading);
 
   let listing;
   try {
@@ -383,7 +391,8 @@ async function refresh({ force = false } = {}) {
   renderTree();
 
   // Фоновая загрузка размеров и файлов (не блокирует интерфейс).
-  startCrawlIfEnabled();
+  if (recrawl) startCrawlIfEnabled();
+  else if (el.sbText.textContent === reading) setStatus(was[0] || 'idle', was[1], was[2]);
 }
 
 el.sizeMode.addEventListener('change', () => {

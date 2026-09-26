@@ -117,10 +117,32 @@ public sealed class BackendTests : IDisposable
 
         var args = Args(local, network, ["док"]);
         var живой = await _b.Preview(args);
-        await _b.StartCrawl(local.Root, network.Root, false, new RecordingSink());
+        await _b.StartCrawl(local.Root, network.Root, false, false, new RecordingSink());
         var поИндексу = await _b.Preview(args);
 
         Assert.Equal(живой.Totals, поИндексу.Totals);
+    }
+
+    // Перезапуск обхода в окне, где размеры уже есть, не читает кеш с диска и не шлёт его
+    // (замер 26.09.2026: 49 МБ кеша на каждое «Обновить» - паузы сборки мусора до 1,6 с).
+    [Fact]
+    public async Task обход_со_skipCached_не_читает_и_не_шлёт_кеш()
+    {
+        using var local = new TempDir();
+        using var network = new TempDir();
+        local.Write("док/ф.txt", "раз");
+        await _b.StartCrawl(local.Root, network.Root, false, false, new RecordingSink());
+        Assert.True(File.Exists(_b.SizeCache.FileFor(local.Root, network.Root)), "после обхода кеш сохранён");
+
+        var с = new RecordingSink();
+        await _b.StartCrawl(local.Root, network.Root, false, false, с);
+        Assert.NotEmpty(с.Cached);
+
+        var без = new RecordingSink();
+        var r = await _b.StartCrawl(local.Root, network.Root, false, true, без);
+        Assert.True(r.Ok);
+        Assert.Empty(без.Cached);
+        Assert.NotEmpty(без.Progresses);                  // сам обход идёт как обычно
     }
 
     // Битый кеш (обрыв записи, правка руками) уезжал в окно как готовые размеры, и первая
@@ -138,7 +160,7 @@ public sealed class BackendTests : IDisposable
             var json = $"{{\"localPath\":{JsonSerializer.Serialize(local.Root)},\"networkPath\":{JsonSerializer.Serialize(network.Root)},\"entries\":{мусор}}}";
             File.WriteAllText(файл, json);
             var sink = new RecordingSink();
-            var r = await _b.StartCrawl(local.Root, network.Root, false, sink);
+            var r = await _b.StartCrawl(local.Root, network.Root, false, false, sink);
 
             Assert.True(r.Ok, $"обход обязан пройти, а не упасть на кеше {мусор}");
             Assert.All(sink.Cached, e => Assert.NotNull(e.RelPath));
@@ -163,7 +185,7 @@ public sealed class BackendTests : IDisposable
             _b.BeforeQuit();
             данные = File.ReadAllText(_b.SizeCache.FileFor(local.Root, network.Root));
         };
-        await _b.StartCrawl(local.Root, network.Root, false, sink);
+        await _b.StartCrawl(local.Root, network.Root, false, false, sink);
 
         Assert.NotNull(данные);
         using var doc = JsonDocument.Parse(данные!);
@@ -466,7 +488,7 @@ public sealed class BackendTests : IDisposable
         local.Write("док/был.txt", "1");
         var t0 = DateTime.UtcNow;
         _b.Now = () => t0;
-        await _b.StartCrawl(local.Root, network.Root, false, new RecordingSink());
+        await _b.StartCrawl(local.Root, network.Root, false, false, new RecordingSink());
         local.Write("док/появился.txt", "2"); // после обхода
 
         var args = Args(local, network, ["док"]);

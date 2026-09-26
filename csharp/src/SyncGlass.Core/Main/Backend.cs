@@ -277,14 +277,17 @@ public sealed class Backend
         return IsDir(root);
     }
 
-    public async Task<CrawlResult> StartCrawl(string? localPath, string? networkPath, bool noLimit, ICrawlSink sink)
+    // skipCached - в окне размеры уже есть (перезапуск по «Обновить», сортировке по дате):
+    // кеш с диска не читаем и не шлём. Иначе каждый перезапуск разбирал 49 МБ кеша на 300
+    // тысяч записей и заново вливал их в окно - паузы сборки мусора до 1,6 с (26.09.2026).
+    public async Task<CrawlResult> StartCrawl(string? localPath, string? networkPath, bool noLimit, bool skipCached, ICrawlSink sink)
     {
         int token;
         lock (_gate) token = ++_crawlToken;
         bool Current() { lock (_gate) return token == _crawlToken; }
 
         // Сразу отдаём кешированные размеры с прошлого раза, кусками.
-        var cached = await SizeCache.Load(localPath, networkPath);
+        var cached = skipCached ? null : await SizeCache.Load(localPath, networkPath);
         if (cached != null && Current())
         {
             for (var i = 0; i < cached.Count; i += 5000)

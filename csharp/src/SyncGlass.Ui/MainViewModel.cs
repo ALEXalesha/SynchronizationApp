@@ -224,7 +224,9 @@ public sealed partial class MainViewModel : ObservableObject, ICrawlSink
             return;
         }
         SetStatus("busy", "Загрузка размеров и файлов…", "");
-        _ = _api.StartCrawl(LocalPath, NetworkPath, SizeMode == "full", this);
+        // Размеры уже в окне (SizeMap чистится при смене папки и выключении размеров) - кеш
+        // с диска не нужен: обход и так пришлёт свежие.
+        _ = _api.StartCrawl(LocalPath, NetworkPath, SizeMode == "full", SizeMap.Count > 0, this);
     }
 
     // ---- Сортировка: папки всегда сверху, внутри - по имени или по дате (новые сверху) ----
@@ -265,7 +267,8 @@ public sealed partial class MainViewModel : ObservableObject, ICrawlSink
         Sort = value;
         Persist();
         // Для сортировки по дате нужно подтянуть даты (по имени они не грузятся).
-        if (Sort == "date" && prev != "date") await Refresh(false);
+        // Обход размеров от сортировки не зависит - перечитываем только даты папок.
+        if (Sort == "date" && prev != "date") await Refresh(false, recrawl: false);
         else RenderTree();
     }
 
@@ -300,12 +303,17 @@ public sealed partial class MainViewModel : ObservableObject, ICrawlSink
     }
 
     // ---- Загрузка дерева ----
-    public async Task Refresh(bool force)
+    // recrawl: false - только перечитать список (сортировке по дате нужны даты). Перезапуск
+    // обхода заново строит индекс на 300 тысяч файлов, и паузы сборки мусора держали окно
+    // до 1,5 с на каждом переключении сортировки (замер 26.09.2026).
+    public async Task Refresh(bool force, bool recrawl = true)
     {
         if (LocalPath == "" && NetworkPath == "") return;
         var gen = ++_scanGen;
         Expanded.Clear();
-        SetStatus("busy", "Читаю список папок…");
+        var was = (StatusKind, StatusText, StatusSummary);
+        const string reading = "Читаю список папок…";
+        SetStatus("busy", reading);
         ListResult listing;
         try
         {
@@ -321,7 +329,8 @@ public sealed partial class MainViewModel : ObservableObject, ICrawlSink
         InvalidateRootSort();
         PruneMarks(listing.LocalOk, listing.NetworkOk);
         RenderTree();
-        StartCrawlIfEnabled(); // фоновая загрузка размеров не блокирует окно
+        if (recrawl) StartCrawlIfEnabled(); // фоновая загрузка размеров не блокирует окно
+        else if (StatusText == reading) SetStatus(was.StatusKind, was.StatusText, was.StatusSummary);
     }
 
     public void ChangeSizeMode(string mode)
@@ -422,15 +431,37 @@ public sealed partial class MainViewModel : ObservableObject, ICrawlSink
 
     // Строки правятся на месте: тот же ключ - та же строка, меняются только свойства.
     // Пересоздание всех строк сбрасывало бы прокрутку на каждой перерисовке.
+    // Меняется только середина между общим началом и общим концом: раскрытие папки
+    // вставляет её строки, сворачивание убирает. Раньше список очищался целиком, и WPF
+    // строил все строки заново - ~90 мс на щелчок по стрелке (замер 26.09.2026).
+    private const int ResetAbove = 400;
+
     private void SyncRows(List<RowData> data)
     {
-        var sameShape = data.Count == Rows.Count;
-        for (var i = 0; sameShape && i < data.Count; i++) sameShape = Rows[i].Key == data[i].Key;
-        if (!sameShape)
+        int n = data.Count, m = Rows.Count, pre = 0, suf = 0;
+        while (pre < n && pre < m && Rows[pre].Key == data[pre].Key) pre++;
+        while (suf < n - pre && suf < m - pre && Rows[m - 1 - suf].Key == data[n - 1 - suf].Key) suf++;
+        int oldMid = m - pre - suf, newMid = n - pre - suf;
+        if (oldMid + newMid > ResetAbove)
         {
+            // Перестановка почти всего (сортировка, новое дерево) - дешевле одним сбросом.
             var old = Rows.ToDictionary(r => r.Key, StringComparer.Ordinal);
             Rows.Clear();
             foreach (var d in data) Rows.Add(old.TryGetValue(d.Key, out var r) ? r : new TreeRow(d.Key));
+        }
+        else if (oldMid > 0 || newMid > 0)
+        {
+            var reuse = new Dictionary<string, TreeRow>(StringComparer.Ordinal);
+            for (var i = pre + oldMid - 1; i >= pre; i--)
+            {
+                reuse[Rows[i].Key] = Rows[i];
+                Rows.RemoveAt(i);
+            }
+            for (var i = 0; i < newMid; i++)
+            {
+                var d = data[pre + i];
+                Rows.Insert(pre + i, reuse.TryGetValue(d.Key, out var r) ? r : new TreeRow(d.Key));
+            }
         }
         for (var i = 0; i < data.Count; i++) Fill(Rows[i], data[i]);
     }

@@ -22,6 +22,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Эталоны вида, снятые с Electron (tools в тесте флажков рассказывает как) -->
+    <None Include="look\*.png" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\..\src\SyncGlass.Core\SyncGlass.Core.csproj" />
     <ProjectReference Include="..\..\src\SyncGlass.Ui\SyncGlass.Ui.csproj" />
     <ProjectReference Include="..\..\src\SyncGlass.Wpf\SyncGlass.Wpf.csproj" />

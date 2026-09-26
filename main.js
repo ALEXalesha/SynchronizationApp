@@ -573,7 +573,10 @@ async function crawlSide(root, onEntry, skippedOut) {
   return isDir(root);
 }
 
-ipcMain.handle('start-crawl', async (event, { localPath, networkPath, noLimit = false }) => {
+// skipCached — в окне размеры уже есть (перезапуск по «Обновить»): кеш с диска не
+// читаем и не шлём. Иначе каждый перезапуск разбирал 49 МБ кеша на 300 тысяч записей
+// и заново вливал их в окно (замер 26.09.2026 на данных Алексея).
+ipcMain.handle('start-crawl', async (event, { localPath, networkPath, noLimit = false, skipCached = false }) => {
   const token = ++crawlToken;
 
   // Окно могли закрыть посреди обхода — тогда отправка бросает, и без обёртки
@@ -588,7 +591,7 @@ ipcMain.handle('start-crawl', async (event, { localPath, networkPath, noLimit = 
 
   // Сразу отдаём кешированные размеры с прошлого раза — мгновенный показ.
   // Шлём кусками, чтобы renderer не завис на одном огромном сообщении (сотни тысяч).
-  const cached = await loadSizeCache(localPath, networkPath);
+  const cached = skipCached ? null : await loadSizeCache(localPath, networkPath);
   if (cached && token === crawlToken) {
     for (let i = 0; i < cached.length; i += 5000) {
       if (token !== crawlToken) break;

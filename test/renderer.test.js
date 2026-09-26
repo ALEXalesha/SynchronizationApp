@@ -419,3 +419,44 @@ test('размер шрифта плашки растёт вниз вместе 
   }
   assert.strictEqual(prev, 3, 'у самых длинных - самый мелкий шрифт');
 });
+
+// Перенос законов C#-версии (ViewModelTests) от 26.09.2026: Алексей - «быстро делаю
+// действия - подтормаживает». Замер на его данных: каждое «Обновить» и переход на
+// сортировку по дате перезапускали обход размеров, и тот заново читал с диска кеш на
+// 300 тысяч записей (49 МБ) и вливал его в окно, а сортировке обход не нужен вовсе.
+async function withCrawlSpy() {
+  const calls = [];
+  const api = loadRenderer({
+    getSettings: async () => ({ localPath: 'L', networkPath: 'N', sizeMode: 'capped', sort: 'name' }),
+    saveSettings: async () => {},
+    listFolders: async () => ({ items: [{ name: 'док', relPath: 'док', isDir: true, hasLocal: true, hasNetwork: true, mtimeMs: 5 }], localOk: true, networkOk: true }),
+    probe: async () => ({ localOk: true, networkOk: true }),
+    startCrawl: async (args) => { calls.push(args); },
+    stopCrawl: async () => {},
+    onCrawl: () => () => {},
+    onSyncProgress: () => () => {},
+    onPreviewProgress: () => () => {},
+  });
+  for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+  return { api, calls };
+}
+
+test('перезапуск обхода не переливает кеш, который уже в окне', async () => {
+  const { api, calls } = await withCrawlSpy();
+  assert.deepStrictEqual(calls.map((c) => c.skipCached), [false], 'окно пустое - кеш нужен');
+
+  api.mergeSizes([{ relPath: 'док', sizeLocal: 10, cntLocal: 1, sizeNetwork: 10, cntNetwork: 1 }]);
+  api.el.refreshBtn._listeners.click[0]();
+  for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+  assert.deepStrictEqual(calls.map((c) => c.skipCached), [false, true], 'размеры уже в окне');
+});
+
+test('смена сортировки не перезапускает обход', async () => {
+  const { api, calls } = await withCrawlSpy();
+  const обходов = calls.length;
+  api.el.sortMode.value = 'date';
+  api.el.sortMode._listeners.change[0]();
+  for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+  assert.strictEqual(calls.length, обходов);
+  assert.notStrictEqual(api.el.sbText.textContent, 'Читаю список папок…', 'строка состояния не застряла');
+});

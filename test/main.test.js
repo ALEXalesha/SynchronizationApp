@@ -91,6 +91,27 @@ test('план по индексу фонового обхода совпада�
   assert.deepStrictEqual(поИндексу.totals, живой.totals);
 });
 
+// Окно, где размеры уже есть, перезапускает обход с skipCached: кеш с диска не
+// читается и не шлётся заново (26.09.2026, «быстро делаю действия - подтормаживает»).
+test('обход со skipCached не читает и не шлёт кеш', async () => {
+  const { call, sent } = await ready;
+  const local = await tmpDir();
+  const network = await tmpDir();
+  await writeFile(local, 'док/ф.txt', 'раз');
+  await call('start-crawl', { localPath: local, networkPath: network });
+
+  const кешВЭфире = (от) => sent.slice(от).filter((s) => s.ch === 'crawl-cached').length;
+  let было = sent.length;
+  await call('start-crawl', { localPath: local, networkPath: network });
+  assert.ok(кешВЭфире(было) > 0, 'без флага кеш приходит');
+
+  было = sent.length;
+  const r = await call('start-crawl', { localPath: local, networkPath: network, skipCached: true });
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(кешВЭфире(было), 0, 'с флагом кеша нет');
+  assert.ok(sent.slice(было).some((s) => s.ch === 'crawl-progress' || s.ch === 'crawl-done'), 'сам обход идёт');
+});
+
 // Достоверность данных проверяется там же, где их берут: у истории так и
 // сделано, а кеш размеров брал `entries` как есть. Битый файл (обрыв записи
 // от старой версии, правка руками, сбой диска) уезжал в renderer как готовые

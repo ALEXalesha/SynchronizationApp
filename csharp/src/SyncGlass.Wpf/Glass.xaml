@@ -137,14 +137,27 @@
             <Setter.Value>
                 <ControlTemplate TargetType="CheckBox">
                     <StackPanel Orientation="Horizontal" Background="Transparent">
-                        <Border x:Name="Box" Width="16" Height="16" CornerRadius="4" BorderThickness="1.5"
-                                BorderBrush="{StaticResource GlassBorder}" Background="{StaticResource GlassBg}">
-                            <Grid>
-                                <Path x:Name="Tick" Data="M3.5,8 L6.5,11 L12,4.5" Stroke="White" StrokeThickness="2"
-                                      StrokeStartLineCap="Round" StrokeEndLineCap="Round" Visibility="Collapsed" />
-                                <Rectangle x:Name="Dash" Width="8" Height="2" RadiusX="1" RadiusY="1" Fill="White" Visibility="Collapsed" />
-                            </Grid>
-                        </Border>
+                        <!-- Фон и рамка - отдельно: Chromium красит фон и под рамкой
+                             (background-clip: border-box), а WPF-овский Border - только внутри
+                             неё. С одним Border включённый флажок сжимался до 13 px, а с рамкой
+                             цвета фона по её внутреннему краю шёл светлый шов (26.09.2026). -->
+                        <Grid Width="16" Height="16">
+                            <Border x:Name="Box" CornerRadius="4" Background="{StaticResource GlassBg}" />
+                            <Border x:Name="Frame" CornerRadius="4" BorderThickness="1.5" BorderBrush="{StaticResource GlassBorder}">
+                                <!-- Галочка и черта - как ::after в styles.css: координаты от
+                                     внутреннего края рамки; галочка - уголок с рамкой 2 снизу и
+                                     справа, повёрнутый на 45 градусов. Размер 6x10, а не 4x8:
+                                     правило * { box-sizing: border-box } на ::after не действует,
+                                     и рамка идёт снаружи 4x8. Своя ломаная была кривой. -->
+                                <Canvas>
+                                    <Border x:Name="Tick" Canvas.Left="5" Canvas.Top="1.5" Width="6" Height="10"
+                                            BorderBrush="White" BorderThickness="0,0,2,2" RenderTransformOrigin="0.5,0.5" Visibility="Collapsed">
+                                        <Border.RenderTransform><RotateTransform Angle="45" /></Border.RenderTransform>
+                                    </Border>
+                                    <Rectangle x:Name="Dash" Canvas.Left="3" Canvas.Top="6" Width="8" Height="2" RadiusX="1" RadiusY="1" Fill="White" Visibility="Collapsed" />
+                                </Canvas>
+                            </Border>
+                        </Grid>
                         <ContentPresenter x:Name="Label" Margin="7,0,0,0" VerticalAlignment="Center" />
                     </StackPanel>
                     <ControlTemplate.Triggers>
@@ -155,12 +168,12 @@
                         </Trigger>
                         <Trigger Property="IsChecked" Value="True">
                             <Setter TargetName="Box" Property="Background" Value="{StaticResource Accent}" />
-                            <Setter TargetName="Box" Property="BorderBrush" Value="Transparent" />
+                            <Setter TargetName="Frame" Property="BorderBrush" Value="Transparent" />
                             <Setter TargetName="Tick" Property="Visibility" Value="Visible" />
                         </Trigger>
                         <Trigger Property="IsChecked" Value="{x:Null}">
                             <Setter TargetName="Box" Property="Background" Value="{StaticResource Accent}" />
-                            <Setter TargetName="Box" Property="BorderBrush" Value="Transparent" />
+                            <Setter TargetName="Frame" Property="BorderBrush" Value="Transparent" />
                             <Setter TargetName="Dash" Property="Visibility" Value="Visible" />
                         </Trigger>
                     </ControlTemplate.Triggers>

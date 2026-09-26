@@ -39,7 +39,7 @@ public class ScalingTests
         // Исключения на несуществующие пути: работы от них не прибавляется.
         var excludes = Enumerable.Range(0, исключений).Select(i => $"{folders[i % Веток]}/нет{i}").ToList();
 
-        if (сОбходом) await b.StartCrawl(src.Root, dst.Root, true, new RecordingSink());
+        if (сОбходом) await b.StartCrawl(src.Root, dst.Root, true, false, new RecordingSink());
 
         var сколькоРаз = new Dictionary<string, int>(StringComparer.Ordinal);
         FsOps.DiskObserver.Value = p =>
